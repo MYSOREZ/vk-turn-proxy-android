@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:fitsSystemWindows="true"
+    android:background="#121212"> <ScrollView
+    android:layout_width="match_parent"
+    android:layout_height="0dp"
+    android:layout_weight="1"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <Button
+            android:id="@+id/btnUpdateBinary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:backgroundTint="#37474F"
+            android:text="ЗАГРУЗИТЬ НОВОЕ ЯДРО (ФАЙЛ)"
+            android:textColor="#FFFFFF" />
+
+        <Button
+            android:id="@+id/btnBattery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:backgroundTint="#BF360C"
+            android:text="ОТКЛЮЧИТЬ ОПТИМИЗАЦИЮ БАТАРЕИ"
+            android:textColor="#FFFFFF" />
+
+        <Switch
+            android:id="@+id/switchRawMode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Режим своей (Raw) команды"
+            android:textColor="#E0E0E0"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/editRawCommand"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="#1E1E1E"
+            android:fontFamily="monospace"
+            android:hint="./client -n 8 -udp -peer IP:56000 ..."
+            android:padding="12dp"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#757575"
+            android:textSize="14sp"
+            android:visibility="gone" />
+
+        <LinearLayout
+            android:id="@+id/layoutGuiSettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Peer (IP:Port сервера)" android:textColor="#B0BEC5" android:textStyle="bold" android:layout_marginTop="12dp"/>
+            <EditText android:id="@+id/editPeer" android:layout_width="match_parent" android:layout_height="wrap_content" android:backgroundTint="#455A64" android:textColor="#FFFFFF" android:hint="11.22.33.44:00000" android:textColorHint="#616161"/>
+
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Ссылка (VK или Yandex)" android:textColor="#B0BEC5" android:textStyle="bold" android:layout_marginTop="12dp"/>
+            <EditText android:id="@+id/editLink" android:layout_width="match_parent" android:layout_height="wrap_content" android:backgroundTint="#455A64" android:textColor="#FFFFFF" android:hint="https://vk.com/call/join/..." android:textColorHint="#616161"/>
+
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Потоки (-n)" android:textColor="#B0BEC5" android:textStyle="bold" android:layout_marginTop="12dp"/>
+            <EditText android:id="@+id/editN" android:layout_width="match_parent" android:layout_height="wrap_content" android:backgroundTint="#455A64" android:textColor="#FFFFFF" android:inputType="number" android:text="8" />
+
+            <CheckBox android:id="@+id/checkUdp" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Использовать UDP (-udp)" android:textColor="#E0E0E0" android:checked="true" />
+            <CheckBox android:id="@+id/checkNoDtls" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Без обфускации (-no-dtls)" android:textColor="#E0E0E0" />
+
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Локальный порт" android:textColor="#B0BEC5" android:textStyle="bold" android:layout_marginTop="12dp"/>
+            <EditText android:id="@+id/editListen" android:layout_width="match_parent" android:layout_height="wrap_content" android:backgroundTint="#455A64" android:textColor="#FFFFFF" android:text="127.0.0.1:9000" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnToggle"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:layout_marginTop="24dp"
+            android:text="ЗАПУСТИТЬ ПРОКСИ"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:backgroundTint="#2E7D32" />
+    </LinearLayout>
+</ScrollView>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#263238"
+        android:orientation="horizontal"
+        android:padding="4dp"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#CFD8DC"
+            android:padding="8dp"
+            android:text="ТЕРМИНАЛ ЛОГОВ:"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+
+        <Button android:id="@+id/btnCopyLogs" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="COPY" android:textSize="10sp" android:backgroundTint="#455A64"/>
+        <Button android:id="@+id/btnClearLogs" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="4dp" android:text="CLEAR" android:textSize="10sp" android:backgroundTint="#455A64"/>
+    </LinearLayout>
+
+    <ScrollView
+        android:id="@+id/logScrollView"
+        android:layout_width="match_parent"
+        android:layout_height="220dp"
+        android:background="#000000">
+        <TextView
+            android:id="@+id/tvLogs"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#4CAF50"
+            android:textSize="12sp"
+            android:padding="10dp"
+            android:fontFamily="monospace"
+            android:text="Ожидание запуска..." />
+    </ScrollView>
+</LinearLayout>
