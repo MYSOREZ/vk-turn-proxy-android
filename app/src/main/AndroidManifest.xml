@@ -30,6 +30,8 @@
             </intent-filter>
         </activity>
 
+        <activity android:name=".SettingsActivity" android:exported="false" />
+
         <service
             android:name=".ProxyService"
             android:exported="false"

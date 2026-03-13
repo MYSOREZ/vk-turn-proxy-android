@@ -9,12 +9,17 @@ android {
 
     defaultConfig {
         applicationId = "com.vkturn.proxy"
-        minSdk = 26
+        minSdk = 23
         targetSdk = 28
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    packaging {
+        resources.excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        jniLibs.useLegacyPackaging = true
     }
 
     buildTypes {
@@ -27,10 +32,8 @@ android {
         }
     }
 
-    // Отключаем проверку lint для релизных сборок, чтобы сборка release не падала из‑за ExpiredTargetSdkVersion
     lint {
         checkReleaseBuilds = false
-        // при желании можно только отключить конкретное правило:
         disable += "ExpiredTargetSdkVersion"
     }
 
@@ -44,6 +47,9 @@ android {
 }
 
 dependencies {
+    implementation("com.github.mwiede:jsch:0.2.17")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)

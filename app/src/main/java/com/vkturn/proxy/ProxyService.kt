@@ -66,7 +66,6 @@ class ProxyService : Service() {
         val prefs = getSharedPreferences("ProxyPrefs", Context.MODE_PRIVATE)
         val isRaw = prefs.getBoolean("isRaw", false)
 
-        // Ищем обновленный пользователем файл, если его нет - берем вшитый в APK
         val customBin = File(filesDir, "custom_vkturn")
         val executable = if (customBin.exists()) {
             addLog("Используется кастомное ядро из памяти телефона")
@@ -80,9 +79,8 @@ class ProxyService : Service() {
 
         if (isRaw) {
             val rawCmd = prefs.getString("rawCmd", "") ?: ""
-            // Разбиваем строку по пробелам
             val parts = rawCmd.trim().split("\\s+".toRegex())
-            cmdArgs.add(executable) // Подменяем вызов "./client" на реальный путь
+            cmdArgs.add(executable)
             if (parts.size > 1) {
                 cmdArgs.addAll(parts.subList(1, parts.size))
             }
@@ -122,7 +120,6 @@ class ProxyService : Service() {
                     addLog(line ?: "")
                 }
 
-                // Если процесс завершился, выводим код
                 val exitCode = process?.waitFor()
                 addLog("=== ПРОЦЕСС ОСТАНОВЛЕН (Код: $exitCode) ===")
             } catch (e: Exception) {
