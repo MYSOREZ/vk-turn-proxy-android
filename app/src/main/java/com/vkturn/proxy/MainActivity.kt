@@ -25,6 +25,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logScrollView: ScrollView
     private lateinit var btnToggle: Button
 
+    private fun updateToggleButton(isRunning: Boolean = ProxyService.isRunning) {
+        btnToggle.text = if (isRunning) "ОСТАНОВИТЬ ПРОКСИ" else "ЗАПУСТИТЬ ПРОКСИ"
+    }
+
     // Обработка выбора файла для обновления ядра
     private val filePicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
@@ -143,8 +147,8 @@ class MainActivity : AppCompatActivity() {
 
                 checkPermissionsAndStart()
             } else {
-                stopService(Intent(this, ProxyService::class.java))
-                btnToggle.text = "ЗАПУСТИТЬ ПРОКСИ"
+                ProxyService.stopProxy(this)
+                updateToggleButton(false)
             }
         }
     }
@@ -156,14 +160,13 @@ class MainActivity : AppCompatActivity() {
                 return
             }
         }
-        ProxyService.logBuffer.clear()
-        startForegroundService(Intent(this, ProxyService::class.java))
-        btnToggle.text = "ОСТАНОВИТЬ ПРОКСИ"
+        ProxyService.startProxy(this)
+        updateToggleButton(true)
     }
 
     override fun onResume() {
         super.onResume()
-        btnToggle.text = if (ProxyService.isRunning) "ОСТАНОВИТЬ ПРОКСИ" else "ЗАПУСТИТЬ ПРОКСИ"
+        updateToggleButton()
         tvLogs.text = ProxyService.logBuffer.joinToString("\n")
         scrollLogsToEnd()
 
@@ -172,6 +175,11 @@ class MainActivity : AppCompatActivity() {
                 if (tvLogs.text.length > 25000) tvLogs.text = tvLogs.text.substring(10000)
                 tvLogs.append("\n$msg")
                 scrollLogsToEnd()
+            }
+        }
+        ProxyService.onStateChanged = { isRunning ->
+            runOnUiThread {
+                updateToggleButton(isRunning)
             }
         }
     }
@@ -183,5 +191,6 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         ProxyService.onLogReceived = null
+        ProxyService.onStateChanged = null
     }
 }

@@ -2,12 +2,15 @@ package com.vkturn.proxy
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.service.quicksettings.TileService
 import androidx.core.app.NotificationCompat
 import java.io.BufferedReader
 import java.io.File
@@ -20,11 +23,50 @@ class ProxyService : Service() {
         var isRunning = false
         val logBuffer = mutableListOf<String>()
         var onLogReceived: ((String) -> Unit)? = null
+        var onStateChanged: ((Boolean) -> Unit)? = null
 
         fun addLog(msg: String) {
             if (logBuffer.size > 200) logBuffer.removeAt(0)
             logBuffer.add(msg)
             onLogReceived?.invoke(msg)
+        }
+
+        private fun notifyStateChanged(isRunning: Boolean) {
+            onStateChanged?.invoke(isRunning)
+        }
+
+        fun startProxy(context: Context) {
+            logBuffer.clear()
+
+            val intent = Intent(context, ProxyService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        fun stopProxy(context: Context) {
+            context.stopService(Intent(context, ProxyService::class.java))
+        }
+
+        fun toggleProxy(context: Context): Boolean {
+            return if (isRunning) {
+                stopProxy(context)
+                false
+            } else {
+                startProxy(context)
+                true
+            }
+        }
+
+        fun requestTileRefresh(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+
+            TileService.requestListeningState(
+                context,
+                ComponentName(context.packageName, "${context.packageName}.ProxyTileService")
+            )
         }
     }
 
@@ -44,13 +86,29 @@ class ProxyService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (isRunning) return START_STICKY
 
+        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        val pendingIntentFlags = PendingIntent.FLAG_UPDATE_CURRENT or
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+        val openAppPendingIntent = PendingIntent.getActivity(this, 0, openAppIntent, pendingIntentFlags)
+
         val notification = NotificationCompat.Builder(this, "ProxyChannel")
             .setContentTitle("VK TURN Proxy")
             .setContentText("Работает в фоне")
             .setSmallIcon(android.R.drawable.ic_menu_preferences)
+            .setContentIntent(openAppPendingIntent)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setAutoCancel(false)
             .build()
         startForeground(1, notification)
         isRunning = true
+        notifyStateChanged(true)
+        requestTileRefresh(this)
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VkTurn::BgLock")
@@ -134,8 +192,10 @@ class ProxyService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
+        notifyStateChanged(false)
         addLog("=== ОСТАНОВКА ИЗ ИНТЕРФЕЙСА ===")
         process?.destroy()
         if (wakeLock?.isHeld == true) wakeLock?.release()
+        requestTileRefresh(this)
     }
 }
