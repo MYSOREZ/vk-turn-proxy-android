@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">VkTurnProxy</string>
+    <string name="qs_tile_state_running">Прокси включен</string>
+    <string name="qs_tile_state_stopped">Прокси выключен</string>
 </resources>

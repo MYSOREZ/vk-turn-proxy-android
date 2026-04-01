@@ -28,6 +28,10 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
 
         <activity android:name=".SettingsActivity" android:exported="false" />
@@ -36,6 +40,22 @@
             android:name=".ProxyService"
             android:exported="false"
             android:foregroundServiceType="specialUse" />
+
+        <service
+            android:name=".ProxyTileService"
+            android:label="@string/app_name"
+            android:icon="@android:drawable/ic_menu_manage"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true"
+            tools:targetApi="24">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
+                android:value="true" />
+        </service>
 
     </application>
 </manifest>
