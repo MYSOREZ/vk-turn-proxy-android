@@ -273,7 +273,14 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 onValueChange = { rawCommand = it },
                 label = { Text("Команда (raw format)") },
                 modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
-                placeholder = { Text("-peer 1.2.3.4:5678 -vk-link ... -listen 127.0.0.1:9000 -n 8") }
+                placeholder = { Text("-peer 1.2.3.4:5678 -vk-link ... -listen 127.0.0.1:9000 -n 8") },
+                trailingIcon = if (rawCommand.isNotEmpty()) {
+                    {
+                        IconButton(onClick = { rawCommand = "" }) {
+                            Icon(Icons.Default.Clear, contentDescription = "Очистить")
+                        }
+                    }
+                } else null
             )
         } else {
             // Standard Mode UI
@@ -293,7 +300,14 @@ fun SettingsScreen(viewModel: MainViewModel) {
                     },
                     label = { Text("Ссылка (для Bypass)") },
                     modifier = Modifier.weight(1f),
-                    singleLine = true
+                    singleLine = true,
+                    trailingIcon = if (link.isNotEmpty()) {
+                        {
+                            IconButton(onClick = { link = "" }) {
+                                Icon(Icons.Default.Clear, contentDescription = "Очистить")
+                            }
+                        }
+                    } else null
                 )
                 
                 OutlinedTextField(
@@ -301,7 +315,14 @@ fun SettingsScreen(viewModel: MainViewModel) {
                     onValueChange = { linkArg = it },
                     label = { Text("Аргумент") },
                     modifier = Modifier.width(120.dp),
-                    singleLine = true
+                    singleLine = true,
+                    trailingIcon = if (linkArg.isNotEmpty()) {
+                        {
+                            IconButton(onClick = { linkArg = "" }) {
+                                Icon(Icons.Default.Clear, contentDescription = "Очистить")
+                            }
+                        }
+                    } else null
                 )
             }
 
@@ -362,9 +383,18 @@ fun SettingsScreen(viewModel: MainViewModel) {
                                     if (flag.argument == "-no-dtls" && isChecked) {
                                         showDtlsWarning = true
                                     } else {
-                                        currentFlags = currentFlags.map { 
+                                        var newFlags = currentFlags.map { 
                                             if (it.id == flag.id) it.copy(enabled = isChecked) else it 
                                         }
+                                        
+                                        // Взаимоисключение для UDP и VLESS
+                                        if (flag.argument == "-vless" && isChecked) {
+                                            newFlags = newFlags.map { if (it.argument == "-udp") it.copy(enabled = false) else it }
+                                        } else if (flag.argument == "-udp" && isChecked) {
+                                            newFlags = newFlags.map { if (it.argument == "-vless") it.copy(enabled = false) else it }
+                                        }
+                                        
+                                        currentFlags = newFlags
                                     }
                                 },
                                 modifier = Modifier.scale(0.8f)
@@ -436,7 +466,14 @@ fun SettingsScreen(viewModel: MainViewModel) {
                     onValueChange = { peer = it },
                     label = { Text("Адрес сервера (ip:port)") },
                     modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
+                    singleLine = true,
+                    trailingIcon = if (peer.isNotEmpty()) {
+                        {
+                            IconButton(onClick = { peer = "" }) {
+                                Icon(Icons.Default.Clear, contentDescription = "Очистить")
+                            }
+                        }
+                    } else null
                 )
 
                 OutlinedTextField(
@@ -444,7 +481,14 @@ fun SettingsScreen(viewModel: MainViewModel) {
                     onValueChange = { listen = it },
                     label = { Text("Локальный адрес (Listen)") },
                     modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
+                    singleLine = true,
+                    trailingIcon = if (listen.isNotEmpty()) {
+                        {
+                            IconButton(onClick = { listen = "" }) {
+                                Icon(Icons.Default.Clear, contentDescription = "Очистить")
+                            }
+                        }
+                    } else null
                 )
             }
         }

@@ -1,6 +1,7 @@
 package com.vkturn.proxy.models
 
 import java.util.UUID
+import com.google.gson.annotations.SerializedName
 
 data class ProxyProfile(
     val id: String = UUID.randomUUID().toString(),
@@ -9,23 +10,29 @@ data class ProxyProfile(
     val isDefault: Boolean = false
 )
 
+const val FLAG_ID_UDP = "flag_udp"
+const val FLAG_ID_VLESS = "flag_vless"
+const val FLAG_ID_CAPTCHA = "flag_captcha"
+const val FLAG_ID_DTLS = "flag_dtls"
+const val FLAG_ID_DEBUG = "flag_debug"
+
 data class ProxyFlag(
-    val id: String = UUID.randomUUID().toString(),
-    var label: String,
-    var argument: String,
-    var enabled: Boolean,
-    val deletable: Boolean = true
+    @SerializedName("id") val id: String = UUID.randomUUID().toString(),
+    @SerializedName("label") var label: String = "",
+    @SerializedName("argument") var argument: String = "",
+    @SerializedName("enabled") var enabled: Boolean = false,
+    @SerializedName("deletable") val deletable: Boolean = true
 )
 
 data class ClientConfig(
-    val serverAddress: String = "",
-    val vkLink: String = "",
-    val linkArgument: String = "",
-    val threads: Int = 8,
-    val localPort: String = "127.0.0.1:9000",
-    val isRawMode: Boolean = false,
-    val rawCommand: String = "",
-    val customFlags: List<ProxyFlag> = emptyList()
+    @SerializedName("serverAddress") val serverAddress: String = "",
+    @SerializedName("vkLink") val vkLink: String = "",
+    @SerializedName("linkArgument") val linkArgument: String = "",
+    @SerializedName("threads") val threads: Int = 8,
+    @SerializedName("localPort") val localPort: String = "127.0.0.1:9000",
+    @SerializedName("isRawMode") val isRawMode: Boolean = false,
+    @SerializedName("rawCommand") val rawCommand: String = "",
+    @SerializedName("customFlags") val customFlags: List<ProxyFlag> = emptyList()
 ) {
     fun generateRawCommand(): String {
         val cmds = mutableListOf<String>()

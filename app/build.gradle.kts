@@ -12,8 +12,8 @@ android {
         applicationId = "com.vkturn.proxy"
         minSdk = 23
         targetSdk = 28
-        versionCode = 7
-        versionName = "2.0.0"
+        versionCode = 8
+        versionName = "2.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -74,6 +74,7 @@ android {
         compose = true
     }
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
@@ -83,6 +84,9 @@ android {
 }
 
 dependencies {
+    // Core Library Desugaring (поддержка новых Java/Android API на старых устройствах)
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
     // SSH и Корутины
     implementation("com.github.mwiede:jsch:0.2.17")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")

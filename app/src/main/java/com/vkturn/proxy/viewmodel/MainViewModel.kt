@@ -7,12 +7,9 @@ import androidx.lifecycle.viewModelScope
 import com.vkturn.proxy.ProxyService
 import com.vkturn.proxy.SSHManager
 import com.vkturn.proxy.data.AppPreferences
-import com.vkturn.proxy.models.ClientConfig
-import com.vkturn.proxy.models.SshConfig
+import com.vkturn.proxy.models.*
 import com.vkturn.proxy.states.ProxyState
 import com.vkturn.proxy.states.SshConnectionState
-import com.vkturn.proxy.models.ProxyProfile
-import com.vkturn.proxy.models.ProxyFlag
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -77,13 +74,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             checkForCaptcha(msg)
         }
         
-        viewModelScope.launch {
-            profiles.collectLatest { list ->
-                if (list.isNotEmpty() && selectedProfileId.value.isEmpty()) {
-                    selectProfile(list[0].id)
-                }
-            }
-        }
+        // Profile selection is now handled robustly in AppPreferences during initialization
 
         viewModelScope.launch {
             while (true) {
@@ -371,7 +362,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     suspend fun importKernel(uri: Uri): Result<String> = withContext(Dispatchers.IO) {
         try {
             val context = getApplication<Application>()
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readNBytes(20) } 
+            val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
+                val buffer = ByteArray(20)
+                val read = input.read(buffer, 0, 20)
+                if (read == -1) null else buffer.sliceArray(0 until read)
+            }
                 ?: return@withContext Result.failure(Exception("Не удалось прочитать файл"))
 
             if (bytes.size < 20 || bytes[0] != 0x7F.toByte() || bytes[1] != 'E'.code.toByte() || bytes[2] != 'L'.code.toByte() || bytes[3] != 'F'.code.toByte()) {

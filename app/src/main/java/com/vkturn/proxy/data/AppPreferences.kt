@@ -11,10 +11,15 @@ import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import com.vkturn.proxy.models.*
 
-class AppPreferences(context: Context) {
+class AppPreferences(private val context: Context) {
+    private val gson = Gson()
     private val proxyPrefs: SharedPreferences = context.getSharedPreferences("ProxyPrefs", Context.MODE_PRIVATE)
     private val sshPrefs: SharedPreferences = context.getSharedPreferences("SshPrefs", Context.MODE_PRIVATE)
+
+    private val _selectedProfileIdFlow = MutableStateFlow(proxyPrefs.getString("selectedProfileId", "") ?: "")
+    val selectedProfileIdFlow: StateFlow<String> = _selectedProfileIdFlow.asStateFlow()
 
     private val _clientConfigFlow = MutableStateFlow(loadClientConfig())
     val clientConfigFlow: StateFlow<ClientConfig> = _clientConfigFlow.asStateFlow()
@@ -22,63 +27,70 @@ class AppPreferences(context: Context) {
     private val _sshConfigFlow = MutableStateFlow(loadSshConfig())
     val sshConfigFlow: StateFlow<SshConfig> = _sshConfigFlow.asStateFlow()
 
-    private val gson = Gson()
-
-    private val _selectedProfileIdFlow = MutableStateFlow(proxyPrefs.getString("selectedProfileId", "") ?: "")
-    val selectedProfileIdFlow: StateFlow<String> = _selectedProfileIdFlow.asStateFlow()
-
     private val _profilesFlow = MutableStateFlow(loadProfiles())
     val profilesFlow: StateFlow<List<ProxyProfile>> = _profilesFlow.asStateFlow()
 
     companion object {
-        fun migrateConfig(config: ClientConfig): ClientConfig {
+        fun migrateConfig(config: ClientConfig, context: android.content.Context? = null): ClientConfig {
             var currentFlags = (config.customFlags ?: emptyList()).toMutableList()
             var changed = false
 
-            if (currentFlags.isEmpty()) {
+            // IMPORTANT: Only treat as "empty" if we have no legacy indicators that this is an existing config.
+            // If the user has a peer set, it means it's NOT a fresh install, so we shouldn't force defaults.
+            val isFreshInstall = if (context != null) {
+                val p = context.getSharedPreferences("ProxyPrefs", android.content.Context.MODE_PRIVATE)
+                p.getString("peer", "").isNullOrEmpty() && p.getString("currentConfigJson", null) == null
+            } else false
+
+            if (currentFlags.isEmpty() && isFreshInstall) {
                 currentFlags = mutableListOf(
-                    ProxyFlag(label = "UDP", argument = "-udp", enabled = true, deletable = false),
-                    ProxyFlag(label = "VLESS", argument = "-vless", enabled = false, deletable = false),
-                    ProxyFlag(label = "Manual Captcha", argument = "--manual-captcha", enabled = false, deletable = false),
-                    ProxyFlag(label = "Disable DTLS", argument = "-no-dtls", enabled = false, deletable = false),
-                    ProxyFlag(label = "Debug", argument = "-debug", enabled = false, deletable = false)
+                    ProxyFlag(id = FLAG_ID_UDP, label = "UDP", argument = "-udp", enabled = true, deletable = false),
+                    ProxyFlag(id = FLAG_ID_VLESS, label = "VLESS", argument = "-vless", enabled = false, deletable = false),
+                    ProxyFlag(id = FLAG_ID_CAPTCHA, label = "Manual Captcha", argument = "--manual-captcha", enabled = false, deletable = false),
+                    ProxyFlag(id = FLAG_ID_DTLS, label = "Disable DTLS", argument = "-no-dtls", enabled = false, deletable = false),
+                    ProxyFlag(id = FLAG_ID_DEBUG, label = "Debug", argument = "-debug", enabled = false, deletable = false)
                 )
                 changed = true
             } else {
-                val mandatoryArgs = listOf("-udp", "-vless", "--manual-captcha", "-no-dtls", "-debug")
-                val mandatoryLabels = mapOf(
-                    "-udp" to "UDP",
-                    "-vless" to "VLESS",
-                    "--manual-captcha" to "Manual Captcha",
-                    "-no-dtls" to "Disable DTLS",
-                    "-debug" to "Debug"
+                val mandatory: List<Triple<String, String, String>> = listOf(
+                    Triple(FLAG_ID_UDP, "-udp", "UDP"),
+                    Triple(FLAG_ID_VLESS, "-vless", "VLESS"),
+                    Triple(FLAG_ID_CAPTCHA, "--manual-captcha", "Manual Captcha"),
+                    Triple(FLAG_ID_DTLS, "-no-dtls", "Disable DTLS"),
+                    Triple(FLAG_ID_DEBUG, "-debug", "Debug")
                 )
 
-                // 1. Update labels and identify present mandatory flags
-                mandatoryArgs.forEach { arg ->
-                    val label = mandatoryLabels[arg]!!
-                    val existing = currentFlags.find { it.argument == arg }
+                // 1. Update labels and ensure mandatory flags exist with stable IDs
+                mandatory.forEach { (id: String, arg: String, label: String) ->
+                    // Try to find by ID first, then by argument
+                    val existing = currentFlags.find { it.id == id } ?: currentFlags.find { it.argument == arg }
+                    
                     if (existing == null) {
-                        currentFlags.add(ProxyFlag(label = label, argument = arg, enabled = false, deletable = false))
+                        currentFlags.add(ProxyFlag(id = id, label = label, argument = arg, enabled = false, deletable = false))
                         changed = true
-                    } else if (existing.label != label) {
-                        val idx = currentFlags.indexOf(existing)
-                        currentFlags[idx] = existing.copy(label = label)
-                        changed = true
+                    } else {
+                        // Found existing, ensure it has stable ID and fresh label
+                        // BUT: don't touch 'enabled'!
+                        if (existing.id != id || existing.label != label || (existing.argument != arg && !existing.deletable)) {
+                            val idx = currentFlags.indexOf(existing)
+                            currentFlags[idx] = existing.copy(id = id, label = label, argument = arg)
+                            changed = true
+                        }
                     }
                 }
 
                 // 2. Reorder: Mandatory flags first in the specified order, then the rest
                 val orderedFlags = mutableListOf<ProxyFlag>()
-                mandatoryArgs.forEach { arg ->
-                    currentFlags.find { it.argument == arg }?.let { orderedFlags.add(it) }
+                mandatory.forEach { (id: String, _: String, _: String) ->
+                    currentFlags.find { it.id == id }?.let { orderedFlags.add(it) }
                 }
-                val otherFlags = currentFlags.filter { it.argument !in mandatoryArgs }
+                val otherFlags = currentFlags.filter { f -> mandatory.none { it.component1() == f.id } }
                 
-                if (currentFlags != (orderedFlags + otherFlags)) {
+                // Compare contents carefully to avoid unnecessary 'changed' triggers
+                val newOrder = orderedFlags + otherFlags
+                if (currentFlags != newOrder) {
                     currentFlags.clear()
-                    currentFlags.addAll(orderedFlags)
-                    currentFlags.addAll(otherFlags)
+                    currentFlags.addAll(newOrder)
                     changed = true
                 }
             }
@@ -89,6 +101,7 @@ class AppPreferences(context: Context) {
                 linkArg = if (config.vkLink.contains("yandex")) "-yandex-link" else "-vk-link"
                 changed = true
             }
+
 
             // Ensure isRawMode is false if rawCommand is empty (safety for legacy profiles)
             if (config.isRawMode && config.rawCommand.isBlank()) {
@@ -108,7 +121,8 @@ class AppPreferences(context: Context) {
         if (json != null) {
             return try {
                 val config = gson.fromJson(json, ClientConfig::class.java)
-                migrateConfig(config)
+                val migrated = migrateConfig(config, context)
+                migrated
             } catch (e: Exception) {
                 createDefaultConfig()
             }
@@ -117,27 +131,21 @@ class AppPreferences(context: Context) {
     }
 
     fun createDefaultConfig(): ClientConfig {
-        val udp = proxyPrefs.getBoolean("udp", true)
-        val noDtls = proxyPrefs.getBoolean("noDtls", false)
-        val captcha = proxyPrefs.getBoolean("useManualCaptcha", false)
-        val link = proxyPrefs.getString("link", "") ?: ""
-        val linkArg = proxyPrefs.getString("linkArg", "") ?: ""
-
         val flags = listOf(
-            ProxyFlag(label = "UDP", argument = "-udp", enabled = udp, deletable = false),
-            ProxyFlag(label = "VLESS", argument = "-vless", enabled = false, deletable = false),
-            ProxyFlag(label = "Manual Captcha", argument = "--manual-captcha", enabled = false, deletable = false),
-            ProxyFlag(label = "Disable DTLS", argument = "-no-dtls", enabled = noDtls, deletable = false),
-            ProxyFlag(label = "Debug", argument = "-debug", enabled = false, deletable = false)
+            ProxyFlag(id = FLAG_ID_UDP, label = "UDP", argument = "-udp", enabled = true, deletable = false),
+            ProxyFlag(id = FLAG_ID_VLESS, label = "VLESS", argument = "-vless", enabled = false, deletable = false),
+            ProxyFlag(id = FLAG_ID_CAPTCHA, label = "Manual Captcha", argument = "--manual-captcha", enabled = false, deletable = false),
+            ProxyFlag(id = FLAG_ID_DTLS, label = "Disable DTLS", argument = "-no-dtls", enabled = false, deletable = false),
+            ProxyFlag(id = FLAG_ID_DEBUG, label = "Debug", argument = "-debug", enabled = false, deletable = false)
         )
 
         return ClientConfig(
             serverAddress = proxyPrefs.getString("peer", "") ?: "",
-            vkLink = link,
-            linkArgument = linkArg,
+            vkLink = proxyPrefs.getString("link", "") ?: "",
+            linkArgument = proxyPrefs.getString("linkArg", "") ?: "",
             threads = proxyPrefs.getString("n", "8")?.toIntOrNull() ?: 8,
             localPort = proxyPrefs.getString("listen", "127.0.0.1:9000") ?: "127.0.0.1:9000",
-            isRawMode = false, // Always default to false for new/default configs
+            isRawMode = false,
             rawCommand = "",
             customFlags = flags
         )
@@ -155,6 +163,7 @@ class AppPreferences(context: Context) {
     }
 
     fun saveClientConfig(config: ClientConfig) {
+        
         proxyPrefs.edit().apply {
             putString("peer", config.serverAddress)
             putString("link", config.vkLink)
@@ -163,6 +172,17 @@ class AppPreferences(context: Context) {
             putString("listen", config.localPort)
             putBoolean("isRaw", config.isRawMode)
             putString("rawCmd", config.rawCommand)
+            
+            // Sync legacy boolean keys for extra safety
+            val udpFlag = config.customFlags.find { it.id == FLAG_ID_UDP }
+            if (udpFlag != null) putBoolean("udp", udpFlag.enabled)
+            
+            val dtlsFlag = config.customFlags.find { it.id == FLAG_ID_DTLS }
+            if (dtlsFlag != null) putBoolean("noDtls", dtlsFlag.enabled)
+
+            val captchaFlag = config.customFlags.find { it.id == FLAG_ID_CAPTCHA }
+            if (captchaFlag != null) putBoolean("useManualCaptcha", captchaFlag.enabled)
+
             putString("currentConfigJson", gson.toJson(config))
         }.apply()
         _clientConfigFlow.value = config
@@ -188,16 +208,26 @@ class AppPreferences(context: Context) {
             proxyPrefs.edit().putString("profilesJson", gson.toJson(profiles)).apply()
             if (proxyPrefs.getString("selectedProfileId", "").isNullOrEmpty()) {
                 proxyPrefs.edit().putString("selectedProfileId", initialProfile.id).apply()
+                _selectedProfileIdFlow.value = initialProfile.id
             }
             return profiles
         }
         val type = object : TypeToken<List<ProxyProfile>>() {}.type
         val rawProfiles: List<ProxyProfile> = gson.fromJson(json, type) ?: emptyList()
-        
+
         val migratedProfiles = rawProfiles.map { profile ->
-            // Safety: if it's named "По умолчанию" but lacks the flag (legacy), set it.
             val isDefault = profile.isDefault || profile.name == "По умолчанию"
-            profile.copy(config = migrateConfig(profile.config), isDefault = isDefault)
+            profile.copy(config = migrateConfig(profile.config, context), isDefault = isDefault)
+        }
+
+
+        val selectedId = proxyPrefs.getString("selectedProfileId", "") ?: ""
+
+        // Ensure we always have a selected profile if list is not empty
+        if (migratedProfiles.isNotEmpty() && selectedId.isEmpty()) {
+            val firstId = migratedProfiles.first().id
+            proxyPrefs.edit().putString("selectedProfileId", firstId).apply()
+            _selectedProfileIdFlow.value = firstId
         }
 
         if (migratedProfiles != rawProfiles) {
