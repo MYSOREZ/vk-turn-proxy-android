@@ -2,7 +2,7 @@
 
 Android-приложение под ядро [vk-turn-proxy](https://github.com/cacggghp/vk-turn-proxy).
 
-## О проекте (Good TURN)
+## О проекте
 
 Проброс трафика WireGuard/Hysteria через TURN-серверы. 
 
