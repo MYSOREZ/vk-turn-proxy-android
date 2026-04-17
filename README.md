@@ -1,6 +1,6 @@
 # TURN Proxy Android
 
-Android-приложение под ядро [vk-turn-proxy](https://github.com/cacggghp/vk-turn-proxy).
+Android-приложение под ядро [turn-proxy](https://github.com/cacggghp/vk-turn-proxy).
 
 ## О проекте
 
