@@ -12,8 +12,8 @@ android {
         applicationId = "com.vkturn.proxy"
         minSdk = 23
         targetSdk = 28
-        versionCode = 8
-        versionName = "2.0.1"
+        versionCode = 9
+        versionName = "2.0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
