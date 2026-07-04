@@ -55,7 +55,7 @@ fun CaptchaWebViewDialog(captchaUrl: String, onDismiss: () -> Unit) {
                             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                                 val url = request.url.toString()
                                 // Allow all captcha-related domains to load inside WebView
-                                val allowedDomains = listOf("localhost", "fapi.vk.com", "login.vk.com", "api.vk.com", "captcha.vk.com", "vk.com", "vk.ru")
+                                val allowedDomains = listOf("localhost", "127.0.0.1", "fapi.vk.com", "login.vk.com", "api.vk.com", "captcha.vk.com", "vk.com", "vk.ru")
                                 val isAllowed = allowedDomains.any { url.contains(it) }
                                 // Only dismiss if navigating to a completely unrelated page
                                 if (!isAllowed) {

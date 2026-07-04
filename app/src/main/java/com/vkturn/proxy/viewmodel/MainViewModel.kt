@@ -93,7 +93,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun checkForCaptcha(log: String) {
-        val urlPattern = "(https?://(localhost:\\d+|login\\.vk\\.com)\\S*)".toRegex()
+        // Match URLs on localhost or 127.0.0.1 (local kernel server) as well as login.vk.com
+        val urlPattern = "(https?://(localhost:\\d+|127\\.0\\.0\\.1:\\d+|login\\.vk\\.com)\\S*)".toRegex()
         val match = urlPattern.find(log)
         if (match != null) {
             _proxyState.value = ProxyState.CaptchaRequired(match.value)
