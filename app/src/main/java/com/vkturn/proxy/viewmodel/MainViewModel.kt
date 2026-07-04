@@ -73,7 +73,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _proxyLogs.value = ProxyService.logBuffer.toList()
             checkForCaptcha(msg)
         }
-        
+
         // Profile selection is now handled robustly in AppPreferences during initialization
 
         viewModelScope.launch {
@@ -105,8 +105,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _proxyState.value = ProxyState.CaptchaRequired(captchaUrl)
             ProxyService.updateNotification("Требуется авторизация", "Нажмите сюда, чтобы пройти капчу!")
         }
-        
-        // Return to Running if successfully solved 
+
+        // Return to Running if successfully solved
         if (log.contains("Captcha Solved") || log.contains("Manual captcha solved")) {
             if (_proxyState.value is ProxyState.CaptchaRequired) {
                 viewModelScope.launch {
@@ -181,7 +181,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // --- Flag Management --- //
-    
+
     fun toggleFlag(flagId: String) {
         val currentFlags = clientConfig.value.customFlags.toMutableList()
         val index = currentFlags.indexOfFirst { it.id == flagId }
@@ -198,12 +198,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteFlag(flagId: String) {
-        val currentFlags = clientConfig.value.customFlags.filter { 
+        val currentFlags = clientConfig.value.customFlags.filter {
             it.id != flagId || !it.deletable // Prevent deletion if not deletable anyway, but we'll hide the button in UI
         }
         val protectedFlag = clientConfig.value.customFlags.find { it.id == flagId }
-        if (protectedFlag?.deletable == false) return 
-        
+        if (protectedFlag?.deletable == false) return
+
         saveClientConfig(clientConfig.value.copy(customFlags = currentFlags))
     }
 
@@ -211,7 +211,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val currentFlags = clientConfig.value.customFlags.toMutableList()
         val index = currentFlags.indexOfFirst { it.id == flagId }
         if (index == -1) return
-        
+
         val newIndex = if (up) index - 1 else index + 1
         if (newIndex in currentFlags.indices) {
             val item = currentFlags.removeAt(index)
@@ -269,7 +269,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun generateUniqueName(baseName: String): String {
         val existingNames = profiles.value.map { it.name }
         if (!existingNames.contains(baseName)) return baseName
-        
+
         var counter = 2
         while (existingNames.contains("$baseName $counter")) {
             counter++
@@ -279,7 +279,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun handleProfileImport(text: String, showToast: Boolean = true) {
         if (text.isBlank()) return
-        
+
         try {
             val decoded = try {
                 if (text.startsWith("VKTGZ:")) {
@@ -300,7 +300,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val type = object : TypeToken<List<ProxyProfile>>() {}.type
                 val importedList: List<ProxyProfile> = gson.fromJson(decoded, type)
                 val currentProfiles = profiles.value.toMutableList()
-                
+
                 importedList.forEach { imported ->
                     val migratedConfig = AppPreferences.migrateConfig(imported.config)
                     val uniqueName = generateUniqueName(imported.name)
@@ -361,7 +361,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _sshLog.value = emptyList()
     }
 
-    // --- Kernel Management --- //
+    // --- Kernel Management (client-side) --- //
 
     private fun getKernelFile() = File(getApplication<Application>().filesDir, "libcustom_kernel.so")
 
@@ -381,7 +381,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             val machine = bytes[18].toInt() and 0xFF
             val primaryAbi = Build.SUPPORTED_ABIS[0]
-            
+
             val isCompatible = when {
                 primaryAbi.contains("arm64") -> machine == 183 // EM_AARCH64
                 primaryAbi.contains("armeabi") -> machine == 40 // EM_ARM
@@ -425,7 +425,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun connectSsh() {
         val config = sshConfig.value
         if (config.ip.isEmpty() || config.password.isEmpty()) return
-        
+
         _sshState.value = SshConnectionState.Connecting
         sshManager.disconnect()
         _sshLog.value = listOf("[Система]: Проверка доступа к серверу...")
@@ -447,7 +447,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 checkServerState()
 
                 sshManager.startShell(config.ip, config.port, config.username, config.password, onLogReceived = { output ->
-                    if (output.contains("\u001B[H") || output.contains("\u001B[2J") || output.contains("\u001B[c")) {
+                    if (output.contains("[H") || output.contains("[2J") || output.contains("[c")) {
                         _sshLog.value = emptyList()
                     }
                     val clean = output.replace(Regex("\\x1B\\[[0-9;?]*[a-zA-Z]"), "").replace("\r", "")
@@ -468,21 +468,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_sshState.value !is SshConnectionState.Connected) return
         _serverState.value = ServerState.Checking
         val config = sshConfig.value
-        
+        val bin = shq(effectiveBinName(config))
+
         viewModelScope.launch(Dispatchers.IO) {
-            val checkInstall = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "ls /opt/vk-turn/server-linux-* 2>/dev/null")
-            val installed = checkInstall.contains("server-linux") && !checkInstall.contains("ERROR:")
-            
+            val checkInstall = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "test -f /opt/vk-turn/$bin && echo FOUND")
+            val installed = checkInstall.contains("FOUND")
+
             // Проверяем статус через systemctl или ps
             val checkService = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "systemctl is-active vk-turn-proxy 2>/dev/null")
             val isService = checkService.trim() == "active"
             var running = isService
-            
+
             if (!running) {
-                val checkPs = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "ps aux | grep server-linux | grep -v grep")
-                running = checkPs.contains("server-linux") && !checkPs.contains("ERROR:")
+                val checkPs = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "pgrep -f $bin >/dev/null 2>&1 && echo RUNNING")
+                running = checkPs.contains("RUNNING")
             }
-            
+
             _serverState.value = ServerState.Known(installed, running, isService)
         }
     }
@@ -502,29 +503,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun installServer() {
-        val config = sshConfig.value
-        val l = config.proxyListen
-        val c = config.proxyConnect
-        
-        val script = """
-            mkdir -p /opt/vk-turn && cd /opt/vk-turn && 
-            pkill -9 -f "server-linux-" 2>/dev/null;
-            ARCH=${'$'}(uname -m); 
-            if [ "${'$'}ARCH" = "x86_64" ]; then BIN="server-linux-amd64"; else BIN="server-linux-arm64"; fi; 
-            wget -qO ${'$'}BIN https://github.com/cacggghp/vk-turn-proxy/releases/latest/download/${'$'}BIN && 
-            chmod +x ${'$'}BIN && 
-            
-            # Попытка создать systemd сервис
+    // Безопасно оборачивает произвольную строку в одинарные кавычки для вставки
+    // в shell-скрипт (защита от command injection через поля listen/connect/флаги).
+    private fun shq(s: String): String = "'" + s.replace("'", "'\\''") + "'"
+
+    private fun effectiveBinName(config: SshConfig): String = config.serverBinName.ifBlank { "vk-turn-server" }
+
+    // Общий блок настройки systemd-сервиса: используется и после скачивания по ссылке,
+    // и после ручной SFTP-загрузки бинарника, чтобы кастомное имя/флаги применялись
+    // одинаково независимо от способа доставки ядра на сервер.
+    private fun setupServiceScript(config: SshConfig): String {
+        val bin = shq(effectiveBinName(config))
+        val listen = shq(config.proxyListen)
+        val connect = shq(config.proxyConnect)
+        val extra = shq(config.serverExtraFlags.trim())
+        return """
+            BIN=$bin
+            LISTEN=$listen
+            CONNECT=$connect
+            EXTRA_FLAGS=$extra
+            chmod +x "/opt/vk-turn/${'$'}BIN" 2>/dev/null
             (
-                cat <<EOF > vk-turn-proxy.service
+                cat <<EOF > /opt/vk-turn/vk-turn-proxy.service
 [Unit]
 Description=VK Turn Proxy Service
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/opt/vk-turn/${'$'}BIN -listen $l -connect $c
+ExecStart=/opt/vk-turn/${'$'}BIN -listen ${'$'}LISTEN -connect ${'$'}CONNECT ${'$'}EXTRA_FLAGS
 KillMode=process
 Restart=always
 RestartSec=5
@@ -538,14 +545,35 @@ SyslogIdentifier=vk-turn-proxy
 WantedBy=multi-user.target
 EOF
                 mkdir -p /var/log/vk-turn && chown nobody:nogroup /var/log/vk-turn 2>/dev/null
-                cp vk-turn-proxy.service /etc/systemd/system/ 2>/dev/null && \
+                cp /opt/vk-turn/vk-turn-proxy.service /etc/systemd/system/ 2>/dev/null && \
                 systemctl daemon-reload 2>/dev/null && \
                 systemctl enable vk-turn-proxy 2>/dev/null && \
                 echo "Сервис Systemd настроен!"
             ) || echo "Продолжаем без системного сервиса (нет прав root)"
-            
             echo "Установка завершена!"
         """.trimIndent()
+    }
+
+    // Устанавливает/обновляет серверное ядро по ссылке, указанной пользователем в
+    // sshConfig.kernelSourceUrl. Никакого зашитого по умолчанию источника нет —
+    // ссылку обязательно нужно указать самому (или воспользоваться uploadServerBinary
+    // для ручной загрузки файла с телефона по SFTP).
+    fun installServer() {
+        val config = sshConfig.value
+        if (config.kernelSourceUrl.isBlank()) {
+            _sshLog.value = _sshLog.value + "[Ошибка]: Укажите ссылку на серверное ядро в поле выше, либо загрузите файл вручную кнопкой «Загрузить файл»."
+            return
+        }
+        val bin = shq(effectiveBinName(config))
+        val url = shq(config.kernelSourceUrl.trim())
+        val script = """
+            BIN=$bin
+            RAW_URL=$url
+            ARCH_TAG=${'$'}(uname -m); if [ "${'$'}ARCH_TAG" = "x86_64" ]; then ARCH_TAG=amd64; else ARCH_TAG=arm64; fi
+            URL=${'$'}{RAW_URL//\{arch\}/${'$'}ARCH_TAG}
+            mkdir -p /opt/vk-turn && cd /opt/vk-turn && pkill -9 -f "${'$'}BIN" 2>/dev/null;
+            wget -qO "${'$'}BIN" "${'$'}URL" && chmod +x "${'$'}BIN" && echo "Ядро загружено: ${'$'}BIN" || echo "Ошибка загрузки ядра по ссылке"
+        """.trimIndent() + "\n" + setupServiceScript(config)
         sshManager.sendShellCommand(script)
         // Wait a bit and check state
         viewModelScope.launch {
@@ -554,18 +582,56 @@ EOF
         }
     }
 
+    // Заливает выбранный пользователем локальный файл (кастомное серверное ядро)
+    // на сервер по SFTP и настраивает systemd-сервис под него.
+    suspend fun uploadServerBinary(uri: Uri): Result<String> = withContext(Dispatchers.IO) {
+        val config = sshConfig.value
+        if (config.ip.isEmpty() || config.password.isEmpty()) {
+            return@withContext Result.failure(Exception("Сначала подключитесь к серверу"))
+        }
+        val context = getApplication<Application>()
+        val binName = effectiveBinName(config)
+        val tempFile = File(context.cacheDir, "upload_$binName")
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(tempFile).use { output -> input.copyTo(output) }
+            } ?: return@withContext Result.failure(Exception("Не удалось прочитать файл"))
+
+            val result = sshManager.uploadFile(config.ip, config.port, config.username, config.password, tempFile, "/opt/vk-turn/$binName")
+            if (result.isFailure) {
+                return@withContext Result.failure(result.exceptionOrNull() ?: Exception("Ошибка загрузки"))
+            }
+
+            _sshLog.value = _sshLog.value + "[Система]: Бинарник загружен на сервер (/opt/vk-turn/$binName)."
+            sshManager.sendShellCommand(setupServiceScript(config))
+            viewModelScope.launch {
+                delay(3000)
+                checkServerState()
+            }
+            Result.success("Ядро загружено и настроено")
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            tempFile.delete()
+        }
+    }
+
     fun startServer() {
         val config = sshConfig.value
-        val l = config.proxyListen
-        val c = config.proxyConnect
+        val bin = shq(effectiveBinName(config))
+        val listen = shq(config.proxyListen)
+        val connect = shq(config.proxyConnect)
+        val extra = shq(config.serverExtraFlags.trim())
         val script = """
+            BIN=$bin
+            LISTEN=$listen
+            CONNECT=$connect
+            EXTRA_FLAGS=$extra
             if systemctl is-enabled vk-turn-proxy >/dev/null 2>&1; then
                 systemctl restart vk-turn-proxy && echo "Сервис запущен (systemd)"
             else
-                cd /opt/vk-turn && 
-                ARCH=${'$'}(uname -m); 
-                if [ "${'$'}ARCH" = "x86_64" ]; then BIN="server-linux-amd64"; else BIN="server-linux-arm64"; fi; 
-                nohup ./${'$'}BIN -listen $l -connect $c > server.log 2>&1 & 
+                cd /opt/vk-turn &&
+                nohup "./${'$'}BIN" -listen "${'$'}LISTEN" -connect "${'$'}CONNECT" ${'$'}EXTRA_FLAGS > server.log 2>&1 &
                 echo ${'$'}! > proxy.pid && echo "Сервер запущен вручную (PID: ${'$'}(cat proxy.pid))"
             fi
         """.trimIndent()
@@ -577,13 +643,16 @@ EOF
     }
 
     fun stopServer() {
+        val config = sshConfig.value
+        val bin = shq(effectiveBinName(config))
         val script = """
+            BIN=$bin
             if systemctl is-active vk-turn-proxy >/dev/null 2>&1; then
                 systemctl stop vk-turn-proxy && echo "Сервис остановлен"
             else
-                cd /opt/vk-turn && 
+                cd /opt/vk-turn &&
                 if [ -f proxy.pid ]; then kill -9 ${'$'}(cat proxy.pid) 2>/dev/null; rm -f proxy.pid; fi;
-                pkill -9 -f "server-linux-" 2>/dev/null; 
+                pkill -9 -f "${'$'}BIN" 2>/dev/null;
                 echo "Остановлено вручную."
             fi
         """.trimIndent()

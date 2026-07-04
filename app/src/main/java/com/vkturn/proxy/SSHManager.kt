@@ -1,11 +1,13 @@
 package com.vkturn.proxy
 
 import com.jcraft.jsch.ChannelExec
+import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.Properties
@@ -52,7 +54,7 @@ class SSHManager {
                     val output = String(buffer, 0, read)
                     onLogReceived(output)
                 }
-                
+
                 if (isShellRunning) {
                     // Stream ended unexpectedly (timeout/dropped connection)
                     isShellRunning = false
@@ -126,6 +128,45 @@ class SSHManager {
         } catch (e: Exception) {
             "ERROR: ${e.message}"
         } finally {
+            tempSession?.disconnect()
+        }
+    }
+
+    // Заливает локальный файл (кастомное серверное ядро) на сервер по SFTP.
+    // Используется отдельная временная сессия, не пересекающаяся с интерактивным shell.
+    suspend fun uploadFile(ip: String, port: Int, user: String, pass: String, localFile: File, remotePath: String): Result<Unit> = withContext(Dispatchers.IO) {
+        var tempSession: Session? = null
+        var sftpChannel: ChannelSftp? = null
+        try {
+            val jsch = JSch()
+            tempSession = jsch.getSession(user, ip, port)
+            tempSession.setPassword(pass)
+
+            val config = Properties()
+            config.put("StrictHostKeyChecking", "no")
+            tempSession.setConfig(config)
+            tempSession.connect(10000)
+
+            sftpChannel = tempSession.openChannel("sftp") as ChannelSftp
+            sftpChannel.connect(10000)
+
+            val remoteDir = remotePath.substringBeforeLast('/', "")
+            if (remoteDir.isNotEmpty()) {
+                try {
+                    sftpChannel.mkdir(remoteDir)
+                } catch (e: Exception) {
+                    // Каталог, скорее всего, уже существует — игнорируем.
+                }
+            }
+
+            sftpChannel.put(localFile.absolutePath, remotePath)
+            sftpChannel.chmod(493, remotePath) // 0755
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            sftpChannel?.disconnect()
             tempSession?.disconnect()
         }
     }

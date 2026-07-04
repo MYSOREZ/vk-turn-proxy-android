@@ -52,31 +52,31 @@ data class ClientConfig(
             cmds.add("-n")
             cmds.add(threads.toString())
         }
-        
+
         customFlags.filter { it.enabled && it.argument.isNotBlank() }.forEach { flag ->
             flag.argument.trim().split("\\s+".toRegex()).forEach {
                 cmds.add(it)
             }
         }
-        
+
         return cmds.joinToString(" ")
     }
 
     fun parseFromRawCommand(rawStr: String): ClientConfig {
         if (rawStr.isBlank()) return this
-        
+
         val parts = rawStr.trim().split("\\s+".toRegex())
         var newServerAddress = ""
         var newVkLink = ""
         var newLinkArgument = linkArgument // Start with current one
         var newThreads = 0 // Default to 0 (infinity) if not found in raw
         var newLocalPort = localPort
-        
+
         // Map of base flag name -> full argument string (e.g., "-udp" -> "-udp" or "-test" -> "-test val")
         val encounteredFlags = mutableMapOf<String, String>()
-        
+
         val knownLinkFlags = listOf("-vk-link", "-yandex-link", "-mail-link", "-link")
-        
+
         var i = 0
         while (i < parts.size) {
             val part = parts[i]
@@ -93,7 +93,7 @@ data class ClientConfig(
                 part.startsWith("-") -> {
                     val fullArg: String
                     val nextVal = if (i + 1 < parts.size && !parts[i + 1].startsWith("-")) parts[i + 1] else null
-                    
+
                     if (nextVal != null) {
                         fullArg = "$part $nextVal"
                         // Check if this is a link flag (either known or followed by a URL)
@@ -113,19 +113,19 @@ data class ClientConfig(
             }
             i++
         }
-        
+
         // Smart merge with existing flags
         val updatedCustomFlags = customFlags.mapNotNull { existing ->
             // Extract base flag name from existing.argument (e.g. "-udp" from "-udp")
             val baseName = existing.argument.split("\\s+".toRegex())[0]
-            
+
             // Skip if this flag is now the link argument or a standard field
             if (baseName == newLinkArgument || baseName == "-peer" || baseName == "-listen" || baseName == "-n") {
                 return@mapNotNull null
             }
-            
+
             val matchedNewArg = encounteredFlags[baseName]
-            
+
             if (matchedNewArg != null) {
                 // Flag present in raw string -> enable it and update value
                 encounteredFlags.remove(baseName)
@@ -141,7 +141,7 @@ data class ClientConfig(
                 }
             }
         }.toMutableList()
-        
+
         // Add truly NEW flags that weren't in the list before
         encounteredFlags.forEach { (baseName, fullArg) ->
             if (baseName != newLinkArgument) {
@@ -152,7 +152,7 @@ data class ClientConfig(
                 ))
             }
         }
-        
+
         return this.copy(
             serverAddress = newServerAddress.ifBlank { serverAddress },
             vkLink = newVkLink.ifBlank { vkLink },
@@ -170,5 +170,16 @@ data class SshConfig(
     val username: String = "root",
     val password: String = "",
     val proxyListen: String = "0.0.0.0:56000",
-    val proxyConnect: String = "127.0.0.1:40537"
+    val proxyConnect: String = "127.0.0.1:40537",
+    // Ссылка на кастомное серверное ядро. Может содержать плейсхолдер "{arch}",
+    // который заменяется на amd64/arm64 в зависимости от архитектуры сервера.
+    // Пусто по умолчанию — источник обязательно должен быть указан пользователем
+    // (или ядро загружается вручную файлом через SFTP).
+    val kernelSourceUrl: String = "",
+    // Имя файла бинарника на сервере (в /opt/vk-turn/). Позволяет использовать
+    // разные серверные ядра, а не только жёстко зашитое имя.
+    val serverBinName: String = "vk-turn-server",
+    // Дополнительные флаги запуска серверного бинарника (аналог Raw-режима клиента),
+    // т.к. разные серверные ядра могут поддерживать разные аргументы.
+    val serverExtraFlags: String = ""
 )

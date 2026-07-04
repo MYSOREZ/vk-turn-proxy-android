@@ -64,7 +64,7 @@ class AppPreferences(private val context: Context) {
                 mandatory.forEach { (id: String, arg: String, label: String) ->
                     // Try to find by ID first, then by argument
                     val existing = currentFlags.find { it.id == id } ?: currentFlags.find { it.argument == arg }
-                    
+
                     if (existing == null) {
                         currentFlags.add(ProxyFlag(id = id, label = label, argument = arg, enabled = false, deletable = false))
                         changed = true
@@ -85,7 +85,7 @@ class AppPreferences(private val context: Context) {
                     currentFlags.find { it.id == id }?.let { orderedFlags.add(it) }
                 }
                 val otherFlags = currentFlags.filter { f -> mandatory.none { it.component1() == f.id } }
-                
+
                 // Compare contents carefully to avoid unnecessary 'changed' triggers
                 val newOrder = orderedFlags + otherFlags
                 if (currentFlags != newOrder) {
@@ -106,8 +106,8 @@ class AppPreferences(private val context: Context) {
             // Ensure isRawMode is false if rawCommand is empty (safety for legacy profiles)
             if (config.isRawMode && config.rawCommand.isBlank()) {
                 return config.copy(
-                    customFlags = currentFlags, 
-                    linkArgument = linkArg, 
+                    customFlags = currentFlags,
+                    linkArgument = linkArg,
                     isRawMode = false
                 )
             }
@@ -158,12 +158,15 @@ class AppPreferences(private val context: Context) {
             username = sshPrefs.getString("user", "root") ?: "root",
             password = sshPrefs.getString("pass", "") ?: "",
             proxyListen = sshPrefs.getString("proxyListen", "0.0.0.0:56000") ?: "0.0.0.0:56000",
-            proxyConnect = sshPrefs.getString("proxyConnect", "127.0.0.1:40537") ?: "127.0.0.1:40537"
+            proxyConnect = sshPrefs.getString("proxyConnect", "127.0.0.1:40537") ?: "127.0.0.1:40537",
+            kernelSourceUrl = sshPrefs.getString("kernelSourceUrl", "") ?: "",
+            serverBinName = sshPrefs.getString("serverBinName", "vk-turn-server") ?: "vk-turn-server",
+            serverExtraFlags = sshPrefs.getString("serverExtraFlags", "") ?: ""
         )
     }
 
     fun saveClientConfig(config: ClientConfig) {
-        
+
         proxyPrefs.edit().apply {
             putString("peer", config.serverAddress)
             putString("link", config.vkLink)
@@ -172,11 +175,11 @@ class AppPreferences(private val context: Context) {
             putString("listen", config.localPort)
             putBoolean("isRaw", config.isRawMode)
             putString("rawCmd", config.rawCommand)
-            
+
             // Sync legacy boolean keys for extra safety
             val udpFlag = config.customFlags.find { it.id == FLAG_ID_UDP }
             if (udpFlag != null) putBoolean("udp", udpFlag.enabled)
-            
+
             val dtlsFlag = config.customFlags.find { it.id == FLAG_ID_DTLS }
             if (dtlsFlag != null) putBoolean("noDtls", dtlsFlag.enabled)
 
@@ -196,6 +199,9 @@ class AppPreferences(private val context: Context) {
             putString("pass", config.password)
             putString("proxyListen", config.proxyListen)
             putString("proxyConnect", config.proxyConnect)
+            putString("kernelSourceUrl", config.kernelSourceUrl)
+            putString("serverBinName", config.serverBinName)
+            putString("serverExtraFlags", config.serverExtraFlags)
         }.apply()
         _sshConfigFlow.value = config
     }
@@ -233,7 +239,7 @@ class AppPreferences(private val context: Context) {
         if (migratedProfiles != rawProfiles) {
             proxyPrefs.edit().putString("profilesJson", gson.toJson(migratedProfiles)).apply()
         }
-        
+
         return migratedProfiles
     }
 

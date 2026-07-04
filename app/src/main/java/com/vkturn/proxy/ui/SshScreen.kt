@@ -13,6 +13,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -21,6 +24,7 @@ import com.vkturn.proxy.viewmodel.MainViewModel
 import com.vkturn.proxy.viewmodel.ServerState
 import com.vkturn.proxy.states.SshConnectionState
 import com.vkturn.proxy.ui.theme.*
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,12 +40,29 @@ fun SshScreen(viewModel: MainViewModel) {
     var pass by remember(sshConfig) { mutableStateOf(sshConfig.password) }
     var proxyListen by remember(sshConfig) { mutableStateOf(sshConfig.proxyListen) }
     var proxyConnect by remember(sshConfig) { mutableStateOf(sshConfig.proxyConnect) }
+    var kernelSourceUrl by remember(sshConfig) { mutableStateOf(sshConfig.kernelSourceUrl) }
+    var serverBinName by remember(sshConfig) { mutableStateOf(sshConfig.serverBinName) }
+    var serverExtraFlags by remember(sshConfig) { mutableStateOf(sshConfig.serverExtraFlags) }
 
     var customCommand by remember { mutableStateOf("") }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val clipboardManager = remember { context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
 
-    LaunchedEffect(ip, port, user, pass, proxyListen, proxyConnect) {
+    val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let {
+            scope.launch {
+                val result = viewModel.uploadServerBinary(it)
+                if (result.isSuccess) {
+                    Toast.makeText(context, result.getOrNull() ?: "Ядро загружено", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, result.exceptionOrNull()?.message ?: "Ошибка загрузки", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(ip, port, user, pass, proxyListen, proxyConnect, kernelSourceUrl, serverBinName, serverExtraFlags) {
         viewModel.saveSshConfig(
             sshConfig.copy(
                 ip = ip,
@@ -49,7 +70,10 @@ fun SshScreen(viewModel: MainViewModel) {
                 username = user,
                 password = pass,
                 proxyListen = proxyListen,
-                proxyConnect = proxyConnect
+                proxyConnect = proxyConnect,
+                kernelSourceUrl = kernelSourceUrl,
+                serverBinName = serverBinName,
+                serverExtraFlags = serverExtraFlags
             )
         )
     }
@@ -76,7 +100,7 @@ fun SshScreen(viewModel: MainViewModel) {
             singleLine = true,
             enabled = !isConnected
         )
-        
+
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = port,
@@ -127,8 +151,8 @@ fun SshScreen(viewModel: MainViewModel) {
             )
         ) {
             Text(
-                if (isConnecting) "Проверка..." 
-                else if (isConnected) "Отключиться" 
+                if (isConnecting) "Проверка..."
+                else if (isConnected) "Отключиться"
                 else "Подключиться"
             )
         }
@@ -137,7 +161,7 @@ fun SshScreen(viewModel: MainViewModel) {
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Управление сервером", style = MaterialTheme.typography.titleMedium)
-                
+
                 val state = serverState // Capture delegated property for stable smart cast
                 if (state is ServerState.Checking) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
@@ -172,24 +196,61 @@ fun SshScreen(viewModel: MainViewModel) {
                 singleLine = true
             )
 
+            Text("Серверное ядро (кастомное)", style = MaterialTheme.typography.titleSmall)
+
+            OutlinedTextField(
+                value = kernelSourceUrl,
+                onValueChange = { kernelSourceUrl = it },
+                label = { Text("Ссылка на ядро (URL)") },
+                placeholder = { Text("https://.../server-{arch}, поддерживает {arch}") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = serverBinName,
+                    onValueChange = { serverBinName = it },
+                    label = { Text("Имя бинарника") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = serverExtraFlags,
+                    onValueChange = { serverExtraFlags = it },
+                    label = { Text("Доп. флаги") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true
+                )
+            }
+
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(
-                    onClick = { viewModel.installServer() }, 
+                    onClick = { viewModel.installServer() },
                     modifier = Modifier.weight(1f)
                 ) {
-                    Text(if (isInstalled) "Обновить" else "Установить", maxLines = 1)
+                    Text(if (isInstalled) "Обновить по ссылке" else "Установить по ссылке", maxLines = 1)
                 }
+                OutlinedButton(
+                    onClick = { uploadLauncher.launch("*/*") },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Загрузить файл", maxLines = 1)
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(
-                    onClick = { viewModel.startServer() }, 
-                    modifier = Modifier.weight(1f), 
+                    onClick = { viewModel.startServer() },
+                    modifier = Modifier.weight(1f),
                     enabled = isInstalled && !isRunning,
                     colors = ButtonDefaults.buttonColors(containerColor = StatusGreenDark)
                 ) {
                     Text("Запуск", maxLines = 1)
                 }
                 Button(
-                    onClick = { viewModel.stopServer() }, 
-                    modifier = Modifier.weight(1f), 
+                    onClick = { viewModel.stopServer() },
+                    modifier = Modifier.weight(1f),
                     enabled = isInstalled && isRunning,
                     colors = ButtonDefaults.buttonColors(containerColor = StatusRed)
                 ) {
@@ -207,9 +268,9 @@ fun SshScreen(viewModel: MainViewModel) {
                     modifier = Modifier.weight(1f),
                     singleLine = true
                 )
-                Button(onClick = { 
-                    viewModel.sendSshCommand(customCommand) 
-                    customCommand = "" 
+                Button(onClick = {
+                    viewModel.sendSshCommand(customCommand)
+                    customCommand = ""
                 }) {
                     Text("Отправить")
                 }
@@ -221,8 +282,8 @@ fun SshScreen(viewModel: MainViewModel) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Логи терминала", style = MaterialTheme.typography.titleMedium)
                 Row {
-                    TextButton(onClick = { 
-                        clipboardManager.setPrimaryClip(ClipData.newPlainText("logs", sshLog.joinToString("\n"))) 
+                    TextButton(onClick = {
+                        clipboardManager.setPrimaryClip(ClipData.newPlainText("logs", sshLog.joinToString("\n")))
                     }) {
                         Text("Copy", color = MaterialTheme.colorScheme.primary)
                     }
