@@ -62,13 +62,15 @@ fun SshScreen(viewModel: MainViewModel) {
         }
     }
 
-    LaunchedEffect(ip, port, user, pass, proxyListen, proxyConnect, kernelSourceUrl, serverBinName, serverExtraFlags) {
+    // Пароль намеренно не входит в этот автосейв: раньше он писался в
+    // SharedPreferences на каждое нажатие клавиши в поле пароля. Сохраняем его
+    // отдельно, один раз, непосредственно перед подключением (см. кнопку ниже).
+    LaunchedEffect(ip, port, user, proxyListen, proxyConnect, kernelSourceUrl, serverBinName, serverExtraFlags) {
         viewModel.saveSshConfig(
             sshConfig.copy(
                 ip = ip,
                 port = port.toIntOrNull() ?: 22,
                 username = user,
-                password = pass,
                 proxyListen = proxyListen,
                 proxyConnect = proxyConnect,
                 kernelSourceUrl = kernelSourceUrl,
@@ -132,17 +134,41 @@ fun SshScreen(viewModel: MainViewModel) {
         )
 
         if (sshState is SshConnectionState.Error) {
+            val errMsg = (sshState as SshConnectionState.Error).message
             Text(
-                text = (sshState as SshConnectionState.Error).message,
+                text = errMsg,
                 color = StatusRed,
                 style = MaterialTheme.typography.bodyMedium
             )
+            if (errMsg.contains("хост-ключ", ignoreCase = true)) {
+                TextButton(onClick = { viewModel.forgetSshHostKey() }) {
+                    Text("Сбросить сохранённый ключ", color = StatusRed)
+                }
+            }
         }
 
         Button(
             onClick = {
-                if (isConnected) viewModel.disconnectSsh()
-                else viewModel.connectSsh()
+                if (isConnected) {
+                    viewModel.disconnectSsh()
+                } else {
+                    // Пароль сохраняем именно здесь — в момент реальной попытки
+                    // подключения, а не на каждое нажатие клавиши.
+                    viewModel.saveSshConfig(
+                        sshConfig.copy(
+                            ip = ip,
+                            port = port.toIntOrNull() ?: 22,
+                            username = user,
+                            password = pass,
+                            proxyListen = proxyListen,
+                            proxyConnect = proxyConnect,
+                            kernelSourceUrl = kernelSourceUrl,
+                            serverBinName = serverBinName,
+                            serverExtraFlags = serverExtraFlags
+                        )
+                    )
+                    viewModel.connectSsh()
+                }
             },
             modifier = Modifier.fillMaxWidth(),
             enabled = !isConnecting,
@@ -172,12 +198,30 @@ fun SshScreen(viewModel: MainViewModel) {
                         state.installed -> "Остановлен"
                         else -> "Не установлен"
                     }
-                    Text(
-                        text = statusText,
-                        color = if (state.running) StatusGreen else if (state.installed) StatusYellow else StatusRed,
-                        style = MaterialTheme.typography.labelSmall
-                    )
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = statusText,
+                            color = if (state.running) StatusGreen else if (state.installed) StatusYellow else StatusRed,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                        if (state.binName.isNotEmpty()) {
+                            Text(
+                                "${state.binName} · порт ${state.portStatus}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextSecondary
+                            )
+                        }
+                    }
                 }
+            }
+
+            val knownState = serverState as? ServerState.Known
+            if (knownState != null && knownState.binPath.isNotEmpty()) {
+                Text(
+                    "Путь: ${knownState.binPath}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
             }
 
             OutlinedTextField(

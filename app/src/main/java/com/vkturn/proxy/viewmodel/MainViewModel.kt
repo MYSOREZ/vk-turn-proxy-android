@@ -33,14 +33,21 @@ import kotlinx.coroutines.delay
 sealed class ServerState {
     object Unknown : ServerState()
     object Checking : ServerState()
-    data class Known(val installed: Boolean, val running: Boolean, val isService: Boolean = false) : ServerState()
+    data class Known(
+        val installed: Boolean,
+        val running: Boolean,
+        val isService: Boolean = false,
+        val binName: String = "",
+        val binPath: String = "",
+        val portStatus: String = ""
+    ) : ServerState()
     data class Error(val message: String) : ServerState()
 }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = AppPreferences(application)
-    private val sshManager = SSHManager()
+    private val sshManager = SSHManager(application)
 
     val clientConfig: StateFlow<ClientConfig> = prefs.clientConfigFlow
     val sshConfig: StateFlow<SshConfig> = prefs.sshConfigFlow
@@ -468,10 +475,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_sshState.value !is SshConnectionState.Connected) return
         _serverState.value = ServerState.Checking
         val config = sshConfig.value
-        val bin = shq(effectiveBinName(config))
 
         viewModelScope.launch(Dispatchers.IO) {
-            val checkInstall = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "test -f /opt/vk-turn/$bin && echo FOUND")
+            // Достоверность важнее удобства: если systemd-юнит уже существует, берём
+            // реальный путь к бинарнику из его ExecStart, а не из текущего значения
+            // serverBinName в приложении — оно могло измениться после переименования,
+            // а на сервере всё ещё крутится процесс под старым именем.
+            val unitExecStart = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password,
+                "grep -h '^ExecStart=' /etc/systemd/system/vk-turn-proxy.service 2>/dev/null | head -1")
+            var binPath = ""
+            if (!unitExecStart.startsWith("ERROR:") && unitExecStart.contains("ExecStart=")) {
+                binPath = unitExecStart.substringAfter("ExecStart=").trim().substringBefore(' ')
+            }
+            val binName = if (binPath.isNotEmpty()) binPath.substringAfterLast('/') else effectiveBinName(config)
+            val resolvedPath = binPath.ifEmpty { "/opt/vk-turn/$binName" }
+
+            val checkInstall = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "test -f ${shq(resolvedPath)} && echo FOUND")
             val installed = checkInstall.contains("FOUND")
 
             // Проверяем статус через systemctl или ps
@@ -480,11 +499,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var running = isService
 
             if (!running) {
-                val checkPs = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "pgrep -f $bin >/dev/null 2>&1 && echo RUNNING")
+                val checkPs = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "pgrep -f ${shq(binName)} >/dev/null 2>&1 && echo RUNNING")
                 running = checkPs.contains("RUNNING")
             }
 
-            _serverState.value = ServerState.Known(installed, running, isService)
+            val (portBusy, portRaw) = inspectPort(config)
+            val portStatus = if (!portBusy) "свободен" else {
+                val owner = extractProcessName(portRaw)
+                if (owner != null) "занят: $owner" else "занят"
+            }
+
+            _serverState.value = ServerState.Known(installed, running, isService, binName, resolvedPath, portStatus)
         }
     }
 
@@ -503,11 +528,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun forgetSshHostKey() {
+        val config = sshConfig.value
+        sshManager.forgetHostKey(config.ip, config.port)
+        _sshLog.value = _sshLog.value + "[Система]: Сохранённый хост-ключ сброшен. Подключитесь заново."
+    }
+
     // Безопасно оборачивает произвольную строку в одинарные кавычки для вставки
     // в shell-скрипт (защита от command injection через поля listen/connect/флаги).
     private fun shq(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 
     private fun effectiveBinName(config: SshConfig): String = config.serverBinName.ifBlank { "vk-turn-server" }
+
+    // Определяет, занят ли порт из proxyListen, и (если удаётся) чьим процессом.
+    private suspend fun inspectPort(config: SshConfig): Pair<Boolean, String> {
+        val port = config.proxyListen.substringAfterLast(':').trim()
+        if (port.toIntOrNull() == null) return false to ""
+        val cmd = """
+            P=$port
+            LINE=${'$'}(ss -ltnp 2>/dev/null | awk -v p="${'$'}P" '{n=split(${'$'}4,a,":"); if (a[n]==p) print}')
+            if [ -z "${'$'}LINE" ]; then LINE=${'$'}(netstat -ltnp 2>/dev/null | awk -v p="${'$'}P" '{n=split(${'$'}4,a,":"); if (a[n]==p) print}'); fi
+            echo "${'$'}LINE"
+        """.trimIndent()
+        val out = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, cmd)
+        val busy = out.isNotBlank() && !out.startsWith("ERROR:")
+        return busy to out.trim()
+    }
+
+    private fun extractProcessName(rawInfo: String): String? {
+        return Regex("\\(\"([^\"]+)\"").find(rawInfo)?.groupValues?.get(1)
+            ?: Regex("\\d+/(\\S+)").find(rawInfo)?.groupValues?.get(1)?.trim('/')
+    }
+
+    // Проверка перед установкой/заменой ядра: если порт из proxyListen уже занят
+    // ДРУГИМ процессом (не тем бинарником, который мы собираемся ставить), останов
+    // установку — иначе на одном порту окажутся два бинарника и сервер сломается.
+    private suspend fun checkPortConflict(config: SshConfig): String? {
+        val (busy, rawInfo) = inspectPort(config)
+        if (!busy) return null
+        val targetBin = effectiveBinName(config)
+        val owner = extractProcessName(rawInfo)
+        return when {
+            owner == null -> "Порт ${config.proxyListen} уже занят, но не удалось определить каким процессом " +
+                "(нет прав root или недоступны ss/netstat на сервере). Проверьте вручную перед заменой ядра — " +
+                "иначе рискуете получить два бинарника на одном порту."
+            owner == targetBin -> null
+            else -> "Порт ${config.proxyListen} уже занят другим процессом ('$owner', ожидался '$targetBin'). " +
+                "Остановите его вручную (кнопкой «Стоп», если это старая версия ядра) перед установкой — " +
+                "иначе на одном порту окажутся два бинарника, и сервер сломается."
+        }
+    }
 
     // Общий блок настройки systemd-сервиса: используется и после скачивания по ссылке,
     // и после ручной SFTP-загрузки бинарника, чтобы кастомное имя/флаги применялись
@@ -564,19 +634,24 @@ EOF
             _sshLog.value = _sshLog.value + "[Ошибка]: Укажите ссылку на серверное ядро в поле выше, либо загрузите файл вручную кнопкой «Загрузить файл»."
             return
         }
-        val bin = shq(effectiveBinName(config))
-        val url = shq(config.kernelSourceUrl.trim())
-        val script = """
-            BIN=$bin
-            RAW_URL=$url
-            ARCH_TAG=${'$'}(uname -m); if [ "${'$'}ARCH_TAG" = "x86_64" ]; then ARCH_TAG=amd64; else ARCH_TAG=arm64; fi
-            URL=${'$'}{RAW_URL//\{arch\}/${'$'}ARCH_TAG}
-            mkdir -p /opt/vk-turn && cd /opt/vk-turn && pkill -9 -f "${'$'}BIN" 2>/dev/null;
-            wget -qO "${'$'}BIN" "${'$'}URL" && chmod +x "${'$'}BIN" && echo "Ядро загружено: ${'$'}BIN" || echo "Ошибка загрузки ядра по ссылке"
-        """.trimIndent() + "\n" + setupServiceScript(config)
-        sshManager.sendShellCommand(script)
-        // Wait a bit and check state
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
+            val conflict = checkPortConflict(config)
+            if (conflict != null) {
+                _sshLog.value = _sshLog.value + "[Ошибка]: $conflict"
+                return@launch
+            }
+            val bin = shq(effectiveBinName(config))
+            val url = shq(config.kernelSourceUrl.trim())
+            val script = """
+                BIN=$bin
+                RAW_URL=$url
+                ARCH_TAG=${'$'}(uname -m); if [ "${'$'}ARCH_TAG" = "x86_64" ]; then ARCH_TAG=amd64; else ARCH_TAG=arm64; fi
+                URL=${'$'}{RAW_URL//\{arch\}/${'$'}ARCH_TAG}
+                mkdir -p /opt/vk-turn && cd /opt/vk-turn && pkill -9 -f "${'$'}BIN" 2>/dev/null;
+                wget -qO "${'$'}BIN" "${'$'}URL" && chmod +x "${'$'}BIN" && echo "Ядро загружено: ${'$'}BIN" || echo "Ошибка загрузки ядра по ссылке"
+            """.trimIndent() + "\n" + setupServiceScript(config)
+            sshManager.sendShellCommand(script)
+            // Wait a bit and check state
             delay(5000)
             checkServerState()
         }
@@ -588,6 +663,11 @@ EOF
         val config = sshConfig.value
         if (config.ip.isEmpty() || config.password.isEmpty()) {
             return@withContext Result.failure(Exception("Сначала подключитесь к серверу"))
+        }
+        val conflict = checkPortConflict(config)
+        if (conflict != null) {
+            _sshLog.value = _sshLog.value + "[Ошибка]: $conflict"
+            return@withContext Result.failure(Exception(conflict))
         }
         val context = getApplication<Application>()
         val binName = effectiveBinName(config)

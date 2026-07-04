@@ -1,5 +1,7 @@
 package com.vkturn.proxy
 
+import android.content.Context
+import android.content.SharedPreferences
 import com.jcraft.jsch.ChannelExec
 import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.ChannelShell
@@ -12,32 +14,90 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.Properties
 
-class SSHManager {
+class SSHManager(context: Context) {
+    private val appContext = context.applicationContext
+    private val hostKeyPrefs: SharedPreferences by lazy {
+        appContext.getSharedPreferences("SshHostKeys", Context.MODE_PRIVATE)
+    }
+
     private var session: Session? = null
     private var shellChannel: ChannelShell? = null
     private var shellOutputStream: OutputStream? = null
     @Volatile private var isShellRunning = false
 
+    // Проверка отпечатка хост-ключа по схеме TOFU (Trust On First Use): при первом
+    // подключении к хосту отпечаток сохраняется, при последующих — сверяется.
+    // Несовпадение (переустановка сервера или подмена соединения/MITM) блокирует
+    // подключение вместо молчаливого принятия любого ключа.
+    private fun verifyHostKey(activeSession: Session): String? {
+        val hk = activeSession.hostKey ?: return null
+        val fingerprint = hk.getFingerPrint(JSch())
+        val key = "${activeSession.host}:${activeSession.port}"
+        val saved = hostKeyPrefs.getString(key, null)
+        return when {
+            saved == null -> {
+                hostKeyPrefs.edit().putString(key, fingerprint).apply()
+                null
+            }
+            saved == fingerprint -> null
+            else -> "ВНИМАНИЕ: хост-ключ сервера $key изменился (было: $saved, стало: $fingerprint). " +
+                "Это может означать переустановку сервера ИЛИ подмену соединения (MITM). " +
+                "Если переустановка ожидаема — сбросьте сохранённый ключ и подключитесь заново."
+        }
+    }
+
+    fun forgetHostKey(ip: String, port: Int) {
+        hostKeyPrefs.edit().remove("$ip:$port").apply()
+    }
+
+    // Устанавливает (или переиспользует уже установленную) авторизованную сессию.
+    // Все дальнейшие операции — exec-команды, интерактивный shell, SFTP — используют
+    // один и тот же аутентифицированный канал вместо того, чтобы открывать новое
+    // TCP+SSH-соединение на каждую команду: раньше одно "Подключиться" плюс проверка
+    // статуса сервера создавали до 5 отдельных SSH-хендшейков подряд, что могло
+    // спровоцировать блокировку по fail2ban на стороне сервера.
+    @Synchronized
+    private fun ensureSession(ip: String, port: Int, user: String, pass: String): Result<Session> {
+        val existing = session
+        if (existing != null && existing.isConnected) return Result.success(existing)
+        return try {
+            val jsch = JSch()
+            val newSession = jsch.getSession(user, ip, port)
+            newSession.setPassword(pass)
+
+            val config = Properties()
+            config.put("StrictHostKeyChecking", "no")
+            newSession.setConfig(config)
+            newSession.serverAliveInterval = 10000
+            newSession.connect(10000)
+
+            val hostKeyWarning = verifyHostKey(newSession)
+            if (hostKeyWarning != null) {
+                newSession.disconnect()
+                return Result.failure(Exception(hostKeyWarning))
+            }
+
+            session = newSession
+            Result.success(newSession)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     fun startShell(ip: String, port: Int, user: String, pass: String, onLogReceived: (String) -> Unit, onDisconnected: (String?) -> Unit) {
         Thread {
             try {
-                if (session == null || !session!!.isConnected) {
-                    val jsch = JSch()
-                    session = jsch.getSession(user, ip, port)
-                    session?.setPassword(pass)
-
-                    val config = Properties()
-                    config.put("StrictHostKeyChecking", "no")
-                    session?.setConfig(config)
-                    session?.serverAliveInterval = 10000 // Send keep-alive packet every 10 seconds
-                    session?.connect(10000)
+                val activeSession = ensureSession(ip, port, user, pass).getOrElse {
+                    onLogReceived("\n[ОШИБКА SHELL]: ${it.message}\n")
+                    onDisconnected(it.message)
+                    return@Thread
                 }
 
                 if (shellChannel != null && shellChannel!!.isConnected) {
                     return@Thread
                 }
 
-                shellChannel = session?.openChannel("shell") as ChannelShell
+                shellChannel = activeSession.openChannel("shell") as ChannelShell
                 shellChannel?.setPty(true)
 
                 val inStream: InputStream = shellChannel!!.inputStream
@@ -96,18 +156,10 @@ class SSHManager {
     }
 
     suspend fun executeSilentCommand(ip: String, port: Int, user: String, pass: String, command: String): String = withContext(Dispatchers.IO) {
-        var tempSession: Session? = null
         try {
-            val jsch = JSch()
-            tempSession = jsch.getSession(user, ip, port)
-            tempSession.setPassword(pass)
+            val activeSession = ensureSession(ip, port, user, pass).getOrElse { return@withContext "ERROR: ${it.message}" }
 
-            val config = Properties()
-            config.put("StrictHostKeyChecking", "no")
-            tempSession.setConfig(config)
-            tempSession.connect(5000)
-
-            val channel = tempSession.openChannel("exec") as ChannelExec
+            val channel = activeSession.openChannel("exec") as ChannelExec
             channel.setCommand(command)
             channel.inputStream = null
             channel.setErrStream(null)
@@ -127,27 +179,17 @@ class SSHManager {
             output.toString().trim()
         } catch (e: Exception) {
             "ERROR: ${e.message}"
-        } finally {
-            tempSession?.disconnect()
         }
     }
 
-    // Заливает локальный файл (кастомное серверное ядро) на сервер по SFTP.
-    // Используется отдельная временная сессия, не пересекающаяся с интерактивным shell.
+    // Заливает локальный файл (кастомное серверное ядро) на сервер по SFTP,
+    // используя тот же переиспользуемый канал, что и shell/exec-команды.
     suspend fun uploadFile(ip: String, port: Int, user: String, pass: String, localFile: File, remotePath: String): Result<Unit> = withContext(Dispatchers.IO) {
-        var tempSession: Session? = null
         var sftpChannel: ChannelSftp? = null
         try {
-            val jsch = JSch()
-            tempSession = jsch.getSession(user, ip, port)
-            tempSession.setPassword(pass)
+            val activeSession = ensureSession(ip, port, user, pass).getOrElse { return@withContext Result.failure(it) }
 
-            val config = Properties()
-            config.put("StrictHostKeyChecking", "no")
-            tempSession.setConfig(config)
-            tempSession.connect(10000)
-
-            sftpChannel = tempSession.openChannel("sftp") as ChannelSftp
+            sftpChannel = activeSession.openChannel("sftp") as ChannelSftp
             sftpChannel.connect(10000)
 
             val remoteDir = remotePath.substringBeforeLast('/', "")
@@ -167,7 +209,6 @@ class SSHManager {
             Result.failure(e)
         } finally {
             sftpChannel?.disconnect()
-            tempSession?.disconnect()
         }
     }
 
