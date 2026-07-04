@@ -5,6 +5,9 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -30,7 +33,7 @@ class ProxyService : Service() {
             logBuffer.add(msg)
             onLogReceived?.invoke(msg)
         }
-        
+
         fun updateNotification(title: String, text: String) {
             val ctx = appContext ?: return
             val openAppIntent = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)?.let {
@@ -50,6 +53,19 @@ class ProxyService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var process: Process? = null
 
+    // Отличает "пользователь сам остановил прокси" от "ядро упало само" — только во
+    // втором случае нужен автоперезапуск.
+    @Volatile private var manualStop = false
+
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    // Есть ли у устройства рабочая сеть прямо сейчас. Пока сети нет (метро,
+    // самолётный режим), не пытаемся перезапускать ядро — оно всё равно не
+    // сможет подключиться, а как только сеть появится, перезапуск сработает
+    // мгновенно через onAvailable().
+    @Volatile private var hasNetwork = true
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -58,17 +74,18 @@ class ProxyService : Service() {
             val channel = NotificationChannel("ProxyChannel", "Proxy", NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
+        connectivityManager = getSystemService(ConnectivityManager::class.java)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (isRunning) return START_STICKY
 
         appContext = applicationContext
-        
+
         val openAppIntent = packageManager.getLaunchIntentForPackage(packageName)?.let {
             android.app.PendingIntent.getActivity(this, 0, it, android.app.PendingIntent.FLAG_IMMUTABLE)
         }
-        
+
         val notification = NotificationCompat.Builder(this, "ProxyChannel")
             .setContentTitle("TURN Proxy")
             .setContentText("Работает в фоне")
@@ -78,15 +95,57 @@ class ProxyService : Service() {
             .build()
         startForeground(1, notification)
         isRunning = true
+        manualStop = false
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VkTurn::BgLock")
         wakeLock?.acquire()
 
+        registerNetworkCallback()
+
         addLog("=== ЗАПУСК ПРОКСИ ===")
         startBinary()
 
         return START_STICKY
+    }
+
+    private fun registerNetworkCallback() {
+        val cm = connectivityManager ?: return
+        hasNetwork = isNetworkCurrentlyAvailable(cm)
+
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val wasOffline = !hasNetwork
+                hasNetwork = true
+                if (wasOffline) {
+                    addLog("[Система]: Сеть появилась.")
+                    if (isRunning && !manualStop && !isProcessAlive(process)) {
+                        addLog("[Система]: Ядро не работало — перезапуск немедленно.")
+                        startBinary()
+                    }
+                }
+            }
+
+            override fun onLost(network: Network) {
+                val stillHasNetwork = isNetworkCurrentlyAvailable(cm)
+                hasNetwork = stillHasNetwork
+                if (!stillHasNetwork) {
+                    addLog("[Система]: Сеть пропала — ждём восстановления перед перезапуском ядра.")
+                }
+            }
+        }
+        networkCallback = callback
+        try {
+            cm.registerDefaultNetworkCallback(callback)
+        } catch (e: Exception) {
+            addLog("Не удалось подписаться на статус сети: ${e.message}")
+        }
+    }
+
+    private fun isNetworkCurrentlyAvailable(cm: ConnectivityManager): Boolean {
+        val net = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(net) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private fun startBinary() {
@@ -122,12 +181,12 @@ class ProxyService : Service() {
 
                     cmdArgs.add(executable)
                     cmdArgs.add("-peer")
-                    
+
                     val peer = config.serverAddress
                     val link = config.vkLink
                     val n = config.threads.toString()
                     val listen = config.localPort
-                    
+
                     val resolvedPeer = try {
                         if (peer.contains(":")) {
                             val parts = peer.split(":")
@@ -141,7 +200,7 @@ class ProxyService : Service() {
                     } catch (e: Exception) {
                         peer
                     }
-                    
+
                     cmdArgs.add(resolvedPeer)
                     cmdArgs.add(config.linkArgument)
                     cmdArgs.add(link)
@@ -179,8 +238,33 @@ class ProxyService : Service() {
                 // Если процесс завершился, выводим код
                 val exitCode = process?.waitFor()
                 addLog("=== ПРОЦЕСС ОСТАНОВЛЕН (Код: $exitCode) ===")
+
+                if (!manualStop && isRunning) {
+                    scheduleRestart()
+                }
             } catch (e: Exception) {
                 addLog("КРИТИЧЕСКАЯ ОШИБКА: ${e.message}")
+                if (!manualStop && isRunning) {
+                    scheduleRestart()
+                }
+            }
+        }
+    }
+
+    // Ядро завершилось само (крашнулось/все воркеры сдались), а пользователь прокси
+    // не останавливал — пробуем поднять его снова. Если сети сейчас нет вообще,
+    // не тратим попытки впустую: перезапуск произойдёт мгновенно, как только
+    // registerNetworkCallback() поймает восстановление сети (onAvailable).
+    private fun scheduleRestart() {
+        if (!hasNetwork) {
+            addLog("[Система]: Сети нет — перезапуск ядра отложен до восстановления связи.")
+            return
+        }
+        addLog("[Система]: Перезапуск ядра через 5 сек...")
+        thread {
+            Thread.sleep(5000)
+            if (isRunning && !manualStop && !isProcessAlive(process)) {
+                startBinary()
             }
         }
     }
@@ -188,8 +272,18 @@ class ProxyService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
+        manualStop = true
         addLog("=== ОСТАНОВКА ИЗ ИНТЕРФЕЙСА ===")
-        
+
+        networkCallback?.let {
+            try {
+                connectivityManager?.unregisterNetworkCallback(it)
+            } catch (e: Exception) {
+                // Колбэк мог быть уже не зарегистрирован — не критично.
+            }
+        }
+        networkCallback = null
+
         // Попытка вежливой остановки (SIGINT)
         process?.let { p ->
             thread {
@@ -198,7 +292,7 @@ class ProxyService : Service() {
                     if (pid != null) {
                         addLog("Отправка сигнала SIGINT (PID: $pid)...")
                         android.os.Process.sendSignal(pid, 2) // 2 = SIGINT
-                        
+
                         // Ждем завершения до 2 секунд
                         var count = 0
                         while (count < 20) { // 20 * 100ms = 2s
@@ -207,7 +301,7 @@ class ProxyService : Service() {
                             count++
                         }
                     }
-                    
+
                     if (isProcessAlive(p)) {
                         addLog("Ядро не ответило вовремя, принудительное завершение...")
                         p.destroy()
@@ -220,7 +314,7 @@ class ProxyService : Service() {
                 }
             }
         }
-        
+
         if (wakeLock?.isHeld == true) wakeLock?.release()
         appContext = null
     }
