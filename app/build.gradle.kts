@@ -23,6 +23,18 @@ android {
         }
     }
 
+    // Фиксированный тестовый keystore (не для Google Play): используется во всех
+    // сборках, включая CI, чтобы подпись APK не менялась от сборки к сборке —
+    // иначе обновление приложения поверх предыдущей версии ломается.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("ci-release.keystore.jks")
+            storePassword = "vkturnproxy-ci"
+            keyAlias = "ci-release"
+            keyPassword = "vkturnproxy-ci"
+        }
+    }
+
     // Красивое именование APK файлов
     applicationVariants.all {
         val variantName = name
