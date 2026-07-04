@@ -583,16 +583,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return when {
             owner == null -> "Порт ${config.proxyListen} уже занят, но не удалось определить каким процессом " +
                 "(нет прав root или недоступны ss/netstat на сервере). Проверьте вручную перед заменой ядра — " +
-                "иначе рискуете получить два бинардика на одном порту."
+                "иначе рискуете получить два бинарника на одном порту."
             owner == targetBin -> null
             else -> "Порт ${config.proxyListen} уже занят другим процессом ('$owner', ожидался '$targetBin'). " +
                 "Остановите его вручную (кнопкой «Стоп», если это старая версия ядра) перед установкой — " +
-                "иначе на одном порту окажутся два бинардика, и сервер сломается."
+                "иначе на одном порту окажутся два бинарника, и сервер сломается."
         }
     }
 
     // Общий блок настройки systemd-сервиса: используется и после скачивания по ссылке,
-    // и после ручной SFTP-загрузки бинардика, чтобы кастомное имя/флаги применялись
+    // и после ручной SFTP-загрузки бинарника, чтобы кастомное имя/флаги применялись
     // одинаково независимо от способа доставки ядра на сервер.
     private fun setupServiceScript(config: SshConfig): String {
         val bin = shq(effectiveBinName(config))
@@ -695,7 +695,7 @@ EOF
                 return@withContext Result.failure(result.exceptionOrNull() ?: Exception("Ошибка загрузки"))
             }
 
-            _sshLog.value = _sshLog.value + "[Система]: Бинардик загружен на сервер (/opt/vk-turn/$binName)."
+            _sshLog.value = _sshLog.value + "[Система]: Бинарник загружен на сервер (/opt/vk-turn/$binName)."
             sshManager.sendShellCommand(setupServiceScript(config))
             viewModelScope.launch {
                 delay(3000)
