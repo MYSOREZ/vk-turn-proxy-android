@@ -1,11 +1,17 @@
-name: Build APK
+name: Publish Release
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/publish (e.g. v2.0.2)"
+        required: true
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,9 +44,9 @@ jobs:
       - name: Build release APK
         run: ./gradlew assembleRelease --stacktrace
 
-      - name: Upload APK artifacts
-        uses: actions/upload-artifact@v4
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: TurnProxy-apk
-          path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
+          tag_name: ${{ inputs.tag }}
+          files: app/build/outputs/apk/release/*.apk
+          generate_release_notes: true
