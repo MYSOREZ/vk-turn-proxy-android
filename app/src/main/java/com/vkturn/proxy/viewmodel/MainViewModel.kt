@@ -93,10 +93,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun checkForCaptcha(log: String) {
-        val urlPattern = "(https?://(localhost:\\d+|login\\.vk\\.com)\\S*)".toRegex()
-        val match = urlPattern.find(log)
-        if (match != null) {
-            _proxyState.value = ProxyState.CaptchaRequired(match.value)
+        // Kernel emits "CAPTCHA_SOLVE|<mode>|<url>|<token>" for the manual WebView flow.
+        // The url itself never contains "|", so stop the capture there instead of
+        // greedily eating the trailing token with it.
+        val solveMatch = "CAPTCHA_SOLVE\\|[^|]*\\|(https?://[^|\\s]+)".toRegex().find(log)
+        // Fallback for plain URLs in the log (localhost/127.0.0.1 local server,
+        // or VK's own auth domains, which have changed over time: login.vk.com -> id.vk.ru).
+        val fallbackMatch = "(https?://(localhost:\\d+|127\\.0\\.0\\.1:\\d+|id\\.vk\\.ru|login\\.vk\\.com)\\S*)".toRegex().find(log)
+        val captchaUrl = solveMatch?.groupValues?.get(1) ?: fallbackMatch?.value
+        if (captchaUrl != null) {
+            _proxyState.value = ProxyState.CaptchaRequired(captchaUrl)
             ProxyService.updateNotification("Требуется авторизация", "Нажмите сюда, чтобы пройти капчу!")
         }
         

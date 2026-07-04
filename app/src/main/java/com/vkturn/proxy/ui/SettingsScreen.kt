@@ -351,9 +351,20 @@ fun SettingsScreen(viewModel: MainViewModel) {
                         text = { Text("Отключение DTLS с большой вероятностью приведет к блокировке со стороны сервиса. Вы уверены?") },
                         confirmButton = {
                             TextButton(onClick = {
-                                currentFlags = currentFlags.map { 
-                                    if (it.argument == "-no-dtls") it.copy(enabled = true) else it 
+                                val newFlags = currentFlags.map {
+                                    if (it.argument == "-no-dtls") it.copy(enabled = true) else it
                                 }
+                                currentFlags = newFlags
+                                viewModel.saveClientConfig(clientConfig.copy(
+                                    serverAddress = peer,
+                                    vkLink = link,
+                                    linkArgument = linkArg,
+                                    threads = threads.toInt(),
+                                    localPort = listen,
+                                    isRawMode = false,
+                                    rawCommand = rawCommand,
+                                    customFlags = newFlags
+                                ))
                                 showDtlsWarning = false
                             }) {
                                 Text("Продолжить", color = MaterialTheme.colorScheme.error)
@@ -395,6 +406,16 @@ fun SettingsScreen(viewModel: MainViewModel) {
                                         }
                                         
                                         currentFlags = newFlags
+                                        viewModel.saveClientConfig(clientConfig.copy(
+                                            serverAddress = peer,
+                                            vkLink = link,
+                                            linkArgument = linkArg,
+                                            threads = threads.toInt(),
+                                            localPort = listen,
+                                            isRawMode = false,
+                                            rawCommand = rawCommand,
+                                            customFlags = newFlags
+                                        ))
                                     }
                                 },
                                 modifier = Modifier.scale(0.8f)
