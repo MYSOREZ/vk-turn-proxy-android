@@ -181,5 +181,16 @@ data class SshConfig(
     val serverBinName: String = "vk-turn-server",
     // Дополнительные флаги запуска серверного бинарника (аналог Raw-режима клиента),
     // т.к. разные серверные ядра могут поддерживать разные аргументы.
-    val serverExtraFlags: String = ""
+    val serverExtraFlags: String = "",
+    // Способ аутентификации SSH: "password" или "key".
+    val authMethod: String = "password",
+    // Приватный ключ (PEM/OpenSSH формат) — либо сгенерирован в приложении, либо
+    // вставлен/импортирован пользователем вручную.
+    val privateKeyPem: String = "",
+    // Публичный ключ в формате OpenSSH, соответствующий сгенерированному приватному —
+    // показывается пользователю, чтобы добавить его в authorized_keys на сервере.
+    val publicKeyOpenSsh: String = "",
+    // Пароль (passphrase), которым может быть защищён приватный ключ. Пусто, если
+    // ключ не защищён паролем (например, сгенерированный в приложении).
+    val keyPassphrase: String = ""
 )

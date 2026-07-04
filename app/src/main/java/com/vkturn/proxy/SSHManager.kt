@@ -6,9 +6,12 @@ import com.jcraft.jsch.ChannelExec
 import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
+import com.jcraft.jsch.KeyPair
 import com.jcraft.jsch.Session
+import com.vkturn.proxy.models.SshConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -57,17 +60,28 @@ class SSHManager(context: Context) {
     // статуса сервера создавали до 5 отдельных SSH-хендшейков подряд, что могло
     // спровоцировать блокировку по fail2ban на стороне сервера.
     @Synchronized
-    private fun ensureSession(ip: String, port: Int, user: String, pass: String): Result<Session> {
+    private fun ensureSession(config: SshConfig): Result<Session> {
         val existing = session
         if (existing != null && existing.isConnected) return Result.success(existing)
         return try {
             val jsch = JSch()
-            val newSession = jsch.getSession(user, ip, port)
-            newSession.setPassword(pass)
+            val useKey = config.authMethod == "key" && config.privateKeyPem.isNotBlank()
+            if (useKey) {
+                val passphrase = config.keyPassphrase.ifBlank { null }
+                jsch.addIdentity("vkturn-key", config.privateKeyPem.toByteArray(), null, passphrase?.toByteArray())
+            }
+            val newSession = jsch.getSession(config.username, config.ip, config.port)
+            if (!useKey) {
+                newSession.setPassword(config.password)
+            }
 
-            val config = Properties()
-            config.put("StrictHostKeyChecking", "no")
-            newSession.setConfig(config)
+            val sessionConfig = Properties()
+            sessionConfig.put("StrictHostKeyChecking", "no")
+            if (useKey) {
+                // Требуем именно ключ, без молчаливого отката на пароль.
+                sessionConfig.put("PreferredAuthentications", "publickey")
+            }
+            newSession.setConfig(sessionConfig)
             newSession.serverAliveInterval = 10000
             newSession.connect(10000)
 
@@ -84,10 +98,10 @@ class SSHManager(context: Context) {
         }
     }
 
-    fun startShell(ip: String, port: Int, user: String, pass: String, onLogReceived: (String) -> Unit, onDisconnected: (String?) -> Unit) {
+    fun startShell(config: SshConfig, onLogReceived: (String) -> Unit, onDisconnected: (String?) -> Unit) {
         Thread {
             try {
-                val activeSession = ensureSession(ip, port, user, pass).getOrElse {
+                val activeSession = ensureSession(config).getOrElse {
                     onLogReceived("\n[ОШИБКА SHELL]: ${it.message}\n")
                     onDisconnected(it.message)
                     return@Thread
@@ -155,9 +169,9 @@ class SSHManager(context: Context) {
         }.start()
     }
 
-    suspend fun executeSilentCommand(ip: String, port: Int, user: String, pass: String, command: String): String = withContext(Dispatchers.IO) {
+    suspend fun executeSilentCommand(config: SshConfig, command: String): String = withContext(Dispatchers.IO) {
         try {
-            val activeSession = ensureSession(ip, port, user, pass).getOrElse { return@withContext "ERROR: ${it.message}" }
+            val activeSession = ensureSession(config).getOrElse { return@withContext "ERROR: ${it.message}" }
 
             val channel = activeSession.openChannel("exec") as ChannelExec
             channel.setCommand(command)
@@ -184,10 +198,10 @@ class SSHManager(context: Context) {
 
     // Заливает локальный файл (кастомное серверное ядро) на сервер по SFTP,
     // используя тот же переиспользуемый канал, что и shell/exec-команды.
-    suspend fun uploadFile(ip: String, port: Int, user: String, pass: String, localFile: File, remotePath: String): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun uploadFile(config: SshConfig, localFile: File, remotePath: String): Result<Unit> = withContext(Dispatchers.IO) {
         var sftpChannel: ChannelSftp? = null
         try {
-            val activeSession = ensureSession(ip, port, user, pass).getOrElse { return@withContext Result.failure(it) }
+            val activeSession = ensureSession(config).getOrElse { return@withContext Result.failure(it) }
 
             sftpChannel = activeSession.openChannel("sftp") as ChannelSftp
             sftpChannel.connect(10000)
@@ -222,5 +236,19 @@ class SSHManager(context: Context) {
         shellChannel = null
         session = null
         shellOutputStream = null
+    }
+
+    // Генерирует новую пару SSH-ключей (RSA 3072) для аутентификации по ключу.
+    // Возвращает (приватный ключ, публичный ключ в формате OpenSSH) — публичный
+    // нужно добавить в ~/.ssh/authorized_keys на сервере.
+    fun generateKeyPair(): Pair<String, String> {
+        val jsch = JSch()
+        val kpair = KeyPair.genKeyPair(jsch, KeyPair.RSA, 3072)
+        val privOut = ByteArrayOutputStream()
+        kpair.writePrivateKey(privOut)
+        val pubOut = ByteArrayOutputStream()
+        kpair.writePublicKey(pubOut, "vkturn-proxy-android")
+        kpair.dispose()
+        return privOut.toString(Charsets.UTF_8.name()) to pubOut.toString(Charsets.UTF_8.name())
     }
 }

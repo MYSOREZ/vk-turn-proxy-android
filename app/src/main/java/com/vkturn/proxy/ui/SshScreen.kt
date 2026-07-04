@@ -43,6 +43,9 @@ fun SshScreen(viewModel: MainViewModel) {
     var kernelSourceUrl by remember(sshConfig) { mutableStateOf(sshConfig.kernelSourceUrl) }
     var serverBinName by remember(sshConfig) { mutableStateOf(sshConfig.serverBinName) }
     var serverExtraFlags by remember(sshConfig) { mutableStateOf(sshConfig.serverExtraFlags) }
+    var authMethod by remember(sshConfig) { mutableStateOf(sshConfig.authMethod) }
+    var privateKeyPem by remember(sshConfig) { mutableStateOf(sshConfig.privateKeyPem) }
+    var keyPassphrase by remember(sshConfig) { mutableStateOf(sshConfig.keyPassphrase) }
 
     var customCommand by remember { mutableStateOf("") }
     val context = LocalContext.current
@@ -62,10 +65,17 @@ fun SshScreen(viewModel: MainViewModel) {
         }
     }
 
-    // Пароль намеренно не входит в этот автосейв: раньше он писался в
-    // SharedPreferences на каждое нажатие клавиши в поле пароля. Сохраняем его
-    // отдельно, один раз, непосредственно перед подключением (см. кнопку ниже).
-    LaunchedEffect(ip, port, user, proxyListen, proxyConnect, kernelSourceUrl, serverBinName, serverExtraFlags) {
+    val keyFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let {
+            val text = context.contentResolver.openInputStream(it)?.bufferedReader()?.use { r -> r.readText() }
+            if (text != null) privateKeyPem = text
+        }
+    }
+
+    // Пароль и приватный ключ намеренно не входят в этот автосейв: раньше пароль
+    // писался в SharedPreferences на каждое нажатие клавиши. Сохраняем чувствительные
+    // поля отдельно, один раз, непосредственно перед подключением (см. кнопку ниже).
+    LaunchedEffect(ip, port, user, proxyListen, proxyConnect, kernelSourceUrl, serverBinName, serverExtraFlags, authMethod) {
         viewModel.saveSshConfig(
             sshConfig.copy(
                 ip = ip,
@@ -75,7 +85,8 @@ fun SshScreen(viewModel: MainViewModel) {
                 proxyConnect = proxyConnect,
                 kernelSourceUrl = kernelSourceUrl,
                 serverBinName = serverBinName,
-                serverExtraFlags = serverExtraFlags
+                serverExtraFlags = serverExtraFlags,
+                authMethod = authMethod
             )
         )
     }
@@ -123,15 +134,94 @@ fun SshScreen(viewModel: MainViewModel) {
             )
         }
 
-        OutlinedTextField(
-            value = pass,
-            onValueChange = { pass = it },
-            label = { Text("Пароль") },
-            visualTransformation = PasswordVisualTransformation(),
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            enabled = !isConnected
-        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = authMethod == "password",
+                onClick = { authMethod = "password" },
+                label = { Text("Пароль") },
+                enabled = !isConnected
+            )
+            FilterChip(
+                selected = authMethod == "key",
+                onClick = { authMethod = "key" },
+                label = { Text("SSH-ключ") },
+                enabled = !isConnected
+            )
+        }
+
+        if (authMethod == "password") {
+            OutlinedTextField(
+                value = pass,
+                onValueChange = { pass = it },
+                label = { Text("Пароль") },
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                enabled = !isConnected
+            )
+        } else {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        val pub = viewModel.generateAndSaveKeyPair()
+                        privateKeyPem = viewModel.sshConfig.value.privateKeyPem
+                        keyPassphrase = ""
+                        clipboardManager.setPrimaryClip(ClipData.newPlainText("SSH public key", pub))
+                        Toast.makeText(context, "Ключ сгенерирован, публичный ключ скопирован в буфер", Toast.LENGTH_LONG).show()
+                    },
+                    modifier = Modifier.weight(1f),
+                    enabled = !isConnected
+                ) {
+                    Text("Сгенерировать ключ", maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = { keyFileLauncher.launch("*/*") },
+                    modifier = Modifier.weight(1f),
+                    enabled = !isConnected
+                ) {
+                    Text("Импортировать файл", maxLines = 1)
+                }
+            }
+
+            OutlinedTextField(
+                value = privateKeyPem,
+                onValueChange = { privateKeyPem = it },
+                label = { Text("Приватный ключ") },
+                placeholder = { Text("-----BEGIN OPENSSH PRIVATE KEY-----") },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp),
+                enabled = !isConnected
+            )
+
+            OutlinedTextField(
+                value = keyPassphrase,
+                onValueChange = { keyPassphrase = it },
+                label = { Text("Пароль ключа (если есть)") },
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                enabled = !isConnected
+            )
+
+            if (sshConfig.publicKeyOpenSsh.isNotBlank()) {
+                Text("Публичный ключ (добавьте в ~/.ssh/authorized_keys на сервере):", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                Card(colors = CardDefaults.cardColors(containerColor = DarkSurface), modifier = Modifier.fillMaxWidth()) {
+                    SelectionContainer {
+                        Text(
+                            sshConfig.publicKeyOpenSsh,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                }
+                TextButton(onClick = {
+                    clipboardManager.setPrimaryClip(ClipData.newPlainText("pubkey", sshConfig.publicKeyOpenSsh))
+                    Toast.makeText(context, "Публичный ключ скопирован", Toast.LENGTH_SHORT).show()
+                }) {
+                    Text("Копировать публичный ключ")
+                }
+            }
+        }
 
         if (sshState is SshConnectionState.Error) {
             val errMsg = (sshState as SshConnectionState.Error).message
@@ -152,7 +242,7 @@ fun SshScreen(viewModel: MainViewModel) {
                 if (isConnected) {
                     viewModel.disconnectSsh()
                 } else {
-                    // Пароль сохраняем именно здесь — в момент реальной попытки
+                    // Пароль/ключ сохраняем именно здесь — в момент реальной попытки
                     // подключения, а не на каждое нажатие клавиши.
                     viewModel.saveSshConfig(
                         sshConfig.copy(
@@ -164,7 +254,10 @@ fun SshScreen(viewModel: MainViewModel) {
                             proxyConnect = proxyConnect,
                             kernelSourceUrl = kernelSourceUrl,
                             serverBinName = serverBinName,
-                            serverExtraFlags = serverExtraFlags
+                            serverExtraFlags = serverExtraFlags,
+                            authMethod = authMethod,
+                            privateKeyPem = privateKeyPem,
+                            keyPassphrase = keyPassphrase
                         )
                     )
                     viewModel.connectSsh()

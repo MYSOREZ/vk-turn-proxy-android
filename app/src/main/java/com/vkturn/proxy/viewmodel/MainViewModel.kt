@@ -431,20 +431,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun connectSsh() {
         val config = sshConfig.value
-        if (config.ip.isEmpty() || config.password.isEmpty()) return
+        if (config.ip.isEmpty()) return
+        val hasCredential = if (config.authMethod == "key") config.privateKeyPem.isNotBlank() else config.password.isNotEmpty()
+        if (!hasCredential) return
 
         _sshState.value = SshConnectionState.Connecting
         sshManager.disconnect()
         _sshLog.value = listOf("[Система]: Проверка доступа к серверу...")
 
         viewModelScope.launch(Dispatchers.IO) {
-            val checkAuth = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "echo OK")
+            val checkAuth = sshManager.executeSilentCommand(config, "echo OK")
             if (checkAuth.contains("ERROR:") || !checkAuth.contains("OK")) {
                 var errorMessage = checkAuth.replace("ERROR:", "").trim()
                 if (errorMessage.contains("Connection refused", ignoreCase = true) || errorMessage.contains("ECONNREFUSED", ignoreCase = true)) {
                     errorMessage += "\n\nПохоже, сервер отклонил соединение. Возможно, в вашем регионе принудительно включены «белые списки» (БС) или SSH-сервис на сервере временно недоступен."
                 } else if (errorMessage.contains("Auth fail", ignoreCase = true) || errorMessage.contains("Auth cancel", ignoreCase = true)) {
-                    errorMessage = "Неверный пароль или имя пользователя"
+                    errorMessage = if (config.authMethod == "key") "Ключ отклонён сервером. Убедитесь, что публичный ключ добавлен в ~/.ssh/authorized_keys" else "Неверный пароль или имя пользователя"
                 }
                 _sshState.value = SshConnectionState.Error("Ошибка: $errorMessage")
                 _sshLog.value = _sshLog.value + "[Ошибка]: ${errorMessage.take(60)}..."
@@ -453,7 +455,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _sshLog.value = _sshLog.value + "[Система]: Доступ разрешен. Устанавливаем терминал..."
                 checkServerState()
 
-                sshManager.startShell(config.ip, config.port, config.username, config.password, onLogReceived = { output ->
+                sshManager.startShell(config, onLogReceived = { output ->
                     if (output.contains("[H") || output.contains("[2J") || output.contains("[c")) {
                         _sshLog.value = emptyList()
                     }
@@ -481,7 +483,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // реальный путь к бинарнику из его ExecStart, а не из текущего значения
             // serverBinName в приложении — оно могло измениться после переименования,
             // а на сервере всё ещё крутится процесс под старым именем.
-            val unitExecStart = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password,
+            val unitExecStart = sshManager.executeSilentCommand(config,
                 "grep -h '^ExecStart=' /etc/systemd/system/vk-turn-proxy.service 2>/dev/null | head -1")
             var binPath = ""
             if (!unitExecStart.startsWith("ERROR:") && unitExecStart.contains("ExecStart=")) {
@@ -490,16 +492,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val binName = if (binPath.isNotEmpty()) binPath.substringAfterLast('/') else effectiveBinName(config)
             val resolvedPath = binPath.ifEmpty { "/opt/vk-turn/$binName" }
 
-            val checkInstall = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "test -f ${shq(resolvedPath)} && echo FOUND")
+            val checkInstall = sshManager.executeSilentCommand(config, "test -f ${shq(resolvedPath)} && echo FOUND")
             val installed = checkInstall.contains("FOUND")
 
             // Проверяем статус через systemctl или ps
-            val checkService = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "systemctl is-active vk-turn-proxy 2>/dev/null")
+            val checkService = sshManager.executeSilentCommand(config, "systemctl is-active vk-turn-proxy 2>/dev/null")
             val isService = checkService.trim() == "active"
             var running = isService
 
             if (!running) {
-                val checkPs = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, "pgrep -f ${shq(binName)} >/dev/null 2>&1 && echo RUNNING")
+                val checkPs = sshManager.executeSilentCommand(config, "pgrep -f ${shq(binName)} >/dev/null 2>&1 && echo RUNNING")
                 running = checkPs.contains("RUNNING")
             }
 
@@ -534,6 +536,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _sshLog.value = _sshLog.value + "[Система]: Сохранённый хост-ключ сброшен. Подключитесь заново."
     }
 
+    // Генерирует новую пару SSH-ключей, сохраняет приватный ключ и переключает
+    // способ аутентификации на "key". Возвращает публичный ключ (OpenSSH формат)
+    // для показа пользователю — его нужно добавить в ~/.ssh/authorized_keys на сервере.
+    fun generateAndSaveKeyPair(): String {
+        val (priv, pub) = sshManager.generateKeyPair()
+        val config = sshConfig.value
+        saveSshConfig(config.copy(authMethod = "key", privateKeyPem = priv, publicKeyOpenSsh = pub, keyPassphrase = ""))
+        return pub
+    }
+
     // Безопасно оборачивает произвольную строку в одинарные кавычки для вставки
     // в shell-скрипт (защита от command injection через поля listen/connect/флаги).
     private fun shq(s: String): String = "'" + s.replace("'", "'\\''") + "'"
@@ -550,7 +562,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if [ -z "${'$'}LINE" ]; then LINE=${'$'}(netstat -ltnp 2>/dev/null | awk -v p="${'$'}P" '{n=split(${'$'}4,a,":"); if (a[n]==p) print}'); fi
             echo "${'$'}LINE"
         """.trimIndent()
-        val out = sshManager.executeSilentCommand(config.ip, config.port, config.username, config.password, cmd)
+        val out = sshManager.executeSilentCommand(config, cmd)
         val busy = out.isNotBlank() && !out.startsWith("ERROR:")
         return busy to out.trim()
     }
@@ -571,16 +583,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return when {
             owner == null -> "Порт ${config.proxyListen} уже занят, но не удалось определить каким процессом " +
                 "(нет прав root или недоступны ss/netstat на сервере). Проверьте вручную перед заменой ядра — " +
-                "иначе рискуете получить два бинарника на одном порту."
+                "иначе рискуете получить два бинардика на одном порту."
             owner == targetBin -> null
             else -> "Порт ${config.proxyListen} уже занят другим процессом ('$owner', ожидался '$targetBin'). " +
                 "Остановите его вручную (кнопкой «Стоп», если это старая версия ядра) перед установкой — " +
-                "иначе на одном порту окажутся два бинарника, и сервер сломается."
+                "иначе на одном порту окажутся два бинардика, и сервер сломается."
         }
     }
 
     // Общий блок настройки systemd-сервиса: используется и после скачивания по ссылке,
-    // и после ручной SFTP-загрузки бинарника, чтобы кастомное имя/флаги применялись
+    // и после ручной SFTP-загрузки бинардика, чтобы кастомное имя/флаги применялись
     // одинаково независимо от способа доставки ядра на сервер.
     private fun setupServiceScript(config: SshConfig): String {
         val bin = shq(effectiveBinName(config))
@@ -661,7 +673,8 @@ EOF
     // на сервер по SFTP и настраивает systemd-сервис под него.
     suspend fun uploadServerBinary(uri: Uri): Result<String> = withContext(Dispatchers.IO) {
         val config = sshConfig.value
-        if (config.ip.isEmpty() || config.password.isEmpty()) {
+        val hasCredential = if (config.authMethod == "key") config.privateKeyPem.isNotBlank() else config.password.isNotEmpty()
+        if (config.ip.isEmpty() || !hasCredential) {
             return@withContext Result.failure(Exception("Сначала подключитесь к серверу"))
         }
         val conflict = checkPortConflict(config)
@@ -677,12 +690,12 @@ EOF
                 FileOutputStream(tempFile).use { output -> input.copyTo(output) }
             } ?: return@withContext Result.failure(Exception("Не удалось прочитать файл"))
 
-            val result = sshManager.uploadFile(config.ip, config.port, config.username, config.password, tempFile, "/opt/vk-turn/$binName")
+            val result = sshManager.uploadFile(config, tempFile, "/opt/vk-turn/$binName")
             if (result.isFailure) {
                 return@withContext Result.failure(result.exceptionOrNull() ?: Exception("Ошибка загрузки"))
             }
 
-            _sshLog.value = _sshLog.value + "[Система]: Бинарник загружен на сервер (/opt/vk-turn/$binName)."
+            _sshLog.value = _sshLog.value + "[Система]: Бинардик загружен на сервер (/opt/vk-turn/$binName)."
             sshManager.sendShellCommand(setupServiceScript(config))
             viewModelScope.launch {
                 delay(3000)

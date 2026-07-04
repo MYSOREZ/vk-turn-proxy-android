@@ -161,7 +161,11 @@ class AppPreferences(private val context: Context) {
             proxyConnect = sshPrefs.getString("proxyConnect", "127.0.0.1:40537") ?: "127.0.0.1:40537",
             kernelSourceUrl = sshPrefs.getString("kernelSourceUrl", "") ?: "",
             serverBinName = sshPrefs.getString("serverBinName", "vk-turn-server") ?: "vk-turn-server",
-            serverExtraFlags = sshPrefs.getString("serverExtraFlags", "") ?: ""
+            serverExtraFlags = sshPrefs.getString("serverExtraFlags", "") ?: "",
+            authMethod = sshPrefs.getString("authMethod", "password") ?: "password",
+            privateKeyPem = sshPrefs.getString("privateKeyPem", "") ?: "",
+            publicKeyOpenSsh = sshPrefs.getString("publicKeyOpenSsh", "") ?: "",
+            keyPassphrase = sshPrefs.getString("keyPassphrase", "") ?: ""
         )
     }
 
@@ -202,6 +206,10 @@ class AppPreferences(private val context: Context) {
             putString("kernelSourceUrl", config.kernelSourceUrl)
             putString("serverBinName", config.serverBinName)
             putString("serverExtraFlags", config.serverExtraFlags)
+            putString("authMethod", config.authMethod)
+            putString("privateKeyPem", config.privateKeyPem)
+            putString("publicKeyOpenSsh", config.publicKeyOpenSsh)
+            putString("keyPassphrase", config.keyPassphrase)
         }.apply()
         _sshConfigFlow.value = config
     }
