@@ -44,3 +44,4 @@ jobs:
           name: TurnProxy-apk
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+          retention-days: 7
