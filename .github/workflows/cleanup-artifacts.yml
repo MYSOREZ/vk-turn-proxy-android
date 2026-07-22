@@ -1,0 +1,36 @@
+name: Cleanup Old Artifacts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete superseded artifacts across all branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          declare -A latest_run
+
+          while IFS=$'\t' read -r branch run_id; do
+            [ -z "${branch}" ] && continue
+            if [ -z "${latest_run[$branch]:-}" ] || [ "${run_id}" -gt "${latest_run[$branch]}" ]; then
+              latest_run[$branch]="${run_id}"
+            fi
+          done < <(gh api "repos/${{ github.repository }}/actions/artifacts" --paginate \
+            --jq '.artifacts[] | [(.workflow_run.head_branch // ""), .workflow_run.id] | @tsv')
+
+          gh api "repos/${{ github.repository }}/actions/artifacts" --paginate \
+            --jq '.artifacts[] | [(.workflow_run.head_branch // ""), .workflow_run.id, .id] | @tsv' \
+          | while IFS=$'\t' read -r branch run_id artifact_id; do
+              [ -z "${branch}" ] && continue
+              if [ "${run_id}" != "${latest_run[$branch]:-}" ]; then
+                echo "Deleting old artifact ${artifact_id} (branch ${branch}, run ${run_id}, latest for that branch is ${latest_run[$branch]})"
+                gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/${artifact_id}" || true
+              fi
+            done
