@@ -13,7 +13,9 @@
 // works for this problem (and what real DPI-evasion research such as
 // obfs4/Snowflake/format-transforming-encryption relies on) is a lightweight
 // statistical/ML model that runs in microseconds. See core/README.md for the
-// full rationale and how to wire this into a real TURN client/server.
+// full rationale — including the honest limits of this approach against a
+// classifier that was itself trained on captured traffic from this exact
+// scheme, and how EmpiricalIntervals lets you close that gap with real data.
 package aiobfs
 
 import "time"
@@ -27,26 +29,52 @@ type Profile struct {
 	// Name identifies the profile (used for logging/metrics only).
 	Name string
 
-	// PayloadType is placed in the RTP-like header, mirroring real dynamic
-	// payload type numbers WebRTC clients negotiate for these media kinds.
-	PayloadType uint8
+	// PayloadTypes lists the RTP-like payload-type numbers plausible for
+	// this media kind (real dynamic payload types WebRTC clients negotiate
+	// span roughly 96-127, plus a few well-known static ones like 13 for
+	// comfort noise). Shaper picks ONE of these at random each time this
+	// profile is (re)activated and keeps it fixed until the next
+	// activation — real SDP negotiates a payload type once per call and
+	// does not change it mid-session, so a PT that flips on every packet
+	// would itself be a tell. Having more than one candidate means a
+	// classifier can't key on "this tool always uses PT 111."
+	PayloadTypes []uint8
 
 	// PacketBytesMean/StdDev model the ciphertext+header size a real codec
 	// operating in this mode tends to produce for one frame/packet. Wrap()
-	// uses this only to pick a padding target — it never truncates the
+	// uses this only as a fallback padding target when EmpiricalIntervals
+	// isn't calibrated with real size data — it never truncates the
 	// caller's actual payload.
 	PacketBytesMean int
 	PacketBytesStd  int
 
 	// SendInterval is the nominal spacing between packets (e.g. 20ms frames
 	// for Opus audio); IntervalJitter adds proportional random jitter, since
-	// real media pacing is never perfectly periodic.
+	// real media pacing is never perfectly periodic. Used only when
+	// EmpiricalIntervals is empty.
 	SendInterval   time.Duration
 	IntervalJitter float64 // fraction of SendInterval, e.g. 0.15 = ±15%
 
+	// EmpiricalIntervals, when non-empty, overrides SendInterval/
+	// IntervalJitter: each packet's pacing is bootstrap-sampled (drawn
+	// uniformly at random, with replacement) from this slice instead of
+	// computed from the synthetic formula. This is the calibration path —
+	// a synthetic Gaussian-ish jitter model is a reasonable default, but a
+	// classifier trained specifically against this tool can learn its
+	// exact shape; feeding it inter-packet-arrival times measured from a
+	// real capture of the traffic you're disguising as removes that
+	// specific weakness. See LoadDurationsFile for one way to build this
+	// slice from a capture, and core/README.md for the full workflow.
+	EmpiricalIntervals []time.Duration
+
 	// PaddingMax bounds the random padding (in bytes) appended after the
 	// AEAD ciphertext so the wire size approximates PacketBytesMean instead
-	// of leaking the true plaintext length.
+	// of leaking the true plaintext length. The padding amount itself
+	// follows an autocorrelated random walk (see driftState in shaper.go),
+	// not an independent draw per packet — real codec frame sizes are
+	// autocorrelated (rate control, motion compensation carry over from
+	// frame to frame), so independent-per-packet padding would itself be
+	// an unnatural, and therefore learnable, statistical signature.
 	PaddingMax int
 
 	// DecoyProbability is the chance, per send, of also emitting a small
@@ -65,7 +93,7 @@ func StandardProfiles() []Profile {
 	return []Profile{
 		{
 			Name:             "audio_opus",
-			PayloadType:      111,
+			PayloadTypes:     []uint8{96, 101, 105, 109, 111, 113, 120},
 			PacketBytesMean:  110,
 			PacketBytesStd:   40,
 			SendInterval:     20 * time.Millisecond,
@@ -76,7 +104,7 @@ func StandardProfiles() []Profile {
 		},
 		{
 			Name:             "video_low_motion",
-			PayloadType:      96,
+			PayloadTypes:     []uint8{96, 98, 100, 102, 104, 106, 108},
 			PacketBytesMean:  350,
 			PacketBytesStd:   150,
 			SendInterval:     33 * time.Millisecond,
@@ -87,7 +115,7 @@ func StandardProfiles() []Profile {
 		},
 		{
 			Name:             "video_high_motion",
-			PayloadType:      96,
+			PayloadTypes:     []uint8{96, 98, 100, 102, 104, 106, 108},
 			PacketBytesMean:  900,
 			PacketBytesStd:   400,
 			SendInterval:     16 * time.Millisecond,
@@ -98,7 +126,7 @@ func StandardProfiles() []Profile {
 		},
 		{
 			Name:             "screen_share",
-			PayloadType:      100,
+			PayloadTypes:     []uint8{97, 99, 103, 107, 122, 126},
 			PacketBytesMean:  1100,
 			PacketBytesStd:   500,
 			SendInterval:     66 * time.Millisecond,
@@ -109,7 +137,7 @@ func StandardProfiles() []Profile {
 		},
 		{
 			Name:             "idle_keepalive",
-			PayloadType:      13, // RFC 3551 CN (comfort noise) PT, used by real clients during silence
+			PayloadTypes:     []uint8{13}, // RFC 3551 CN (comfort noise) — a real, well-known static PT
 			PacketBytesMean:  32,
 			PacketBytesStd:   10,
 			SendInterval:     200 * time.Millisecond,

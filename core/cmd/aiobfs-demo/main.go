@@ -110,11 +110,20 @@ func runServer(ctx context.Context, key string) (*net.UDPAddr, error) {
 // ---------------------------------------------------------------- censor --
 
 // censor sits between client and server like a DPI middlebox: it forwards
-// everything by default, but once armed against a payload-type fingerprint
-// it mostly drops (and otherwise heavily delays) packets carrying it —
-// exactly the visible byte an on-path observer *can* see, since our own
-// disguise deliberately leaves the payload-type field in cleartext to look
-// like ordinary WebRTC signaling.
+// everything by default, but once armed against a disguise family it mostly
+// drops (and otherwise heavily delays) packets carrying any of that
+// family's payload types — exactly the visible byte an on-path observer
+// *can* see, since our own disguise deliberately leaves the payload-type
+// field in cleartext to look like ordinary WebRTC signaling.
+//
+// It blocks by family (a whole Profile.PayloadTypes set), not one literal
+// PT number: aiobfs picks one PT at random from that set per profile
+// activation specifically so a classifier can't key on a single constant
+// value, so a censor that only recognized one exact number would miss most
+// activations of the profile it's supposedly targeting. A real fingerprint
+// would key on the whole statistical shape (packet-size/timing
+// distribution etc.), which in this loopback simulation we approximate by
+// "any PT this family is known to use."
 type censor struct {
 	conn       *net.UDPConn
 	serverAddr *net.UDPAddr
@@ -141,20 +150,28 @@ func runCensor(ctx context.Context, serverAddr *net.UDPAddr) (*net.UDPAddr, erro
 }
 
 // schedule escalates censorship over the demo's runtime: first the default
-// audio disguise gets fingerprinted and blocked, then — forcing a second,
-// different adaptation — the video disguise gets blocked too.
+// audio disguise family gets fingerprinted and blocked, then — forcing a
+// second, different adaptation — the video family gets blocked too.
 func (c *censor) schedule(ctx context.Context) {
+	profiles := aiobfs.StandardProfiles()
+	audioPTs := profiles[0].PayloadTypes                                      // audio_opus
+	videoPTs := dedupePTs(profiles[1].PayloadTypes, profiles[2].PayloadTypes) // video_low_motion + video_high_motion
+
 	select {
 	case <-time.After(7 * time.Second):
-		fmt.Println("\n>>> [censor] fingerprinted PT=111 (audio_opus-shaped traffic) — blocking it now")
-		c.blockedTypes.Store(uint8(111), struct{}{})
+		fmt.Printf("\n>>> [censor] fingerprinted the audio_opus family (PT in %v) — blocking it now\n", audioPTs)
+		for _, pt := range audioPTs {
+			c.blockedTypes.Store(pt, struct{}{})
+		}
 	case <-ctx.Done():
 		return
 	}
 	select {
 	case <-time.After(8 * time.Second):
-		fmt.Println("\n>>> [censor] fingerprinted PT=96 (video-shaped traffic) too — blocking that as well")
-		c.blockedTypes.Store(uint8(96), struct{}{})
+		fmt.Printf("\n>>> [censor] fingerprinted the video family (PT in %v) too — blocking that as well\n", videoPTs)
+		for _, pt := range videoPTs {
+			c.blockedTypes.Store(pt, struct{}{})
+		}
 	case <-ctx.Done():
 		return
 	}
@@ -187,6 +204,20 @@ func (c *censor) loop() {
 		}
 		_, _ = c.conn.WriteToUDP(buf[:n], c.serverAddr)
 	}
+}
+
+func dedupePTs(lists ...[]uint8) []uint8 {
+	seen := map[uint8]struct{}{}
+	var out []uint8
+	for _, list := range lists {
+		for _, pt := range list {
+			if _, ok := seen[pt]; !ok {
+				seen[pt] = struct{}{}
+				out = append(out, pt)
+			}
+		}
+	}
+	return out
 }
 
 func (c *censor) decide(pkt []byte) (drop bool, delay time.Duration) {

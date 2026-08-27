@@ -49,9 +49,10 @@ lightweight **statistical/ML model that runs in microseconds**. That's
 what `aiobfs` is:
 
 - **`profile.go`** — five disguise profiles (`audio_opus`, `video_low_motion`,
-  `video_high_motion`, `screen_share`, `idle_keepalive`), each with
-  realistic packet-size, timing, padding, and decoy-traffic statistics for
-  that kind of real-time media.
+  `video_high_motion`, `screen_share`, `idle_keepalive`), each with a
+  candidate list of realistic payload-type numbers, plus packet-size,
+  timing, padding, and decoy-traffic statistics for that kind of real-time
+  media.
 - **`bandit.go`** — a multi-armed bandit (a baseline-subtracted variant of
   EXP3, chosen because it's designed for *adversarial*, not just random,
   reward — exactly the situation of a censor actively trying to penalize
@@ -64,11 +65,21 @@ what `aiobfs` is:
   loss, throughput, time-since-last-switch) rather than only historical
   averages.
 - **`shaper.go`** — ties it together: `Wrap`/`Unwrap` do the actual
-  RTP-shaped, AES-256-GCM-sealed, randomly-padded framing (with a
-  fixed-size FIFO replay guard), `MaybeDecoy` emits keepalive-shaped decoy
-  traffic so idle periods don't visibly "go quiet," and `Observe` feeds
-  back path measurements to train both learners and, at most once per
-  `MinDwell`, switch the active disguise.
+  RTP-shaped, AES-256-GCM-sealed framing (with a fixed-size FIFO replay
+  guard), padded by an autocorrelated random-walk drift rather than
+  independent per-packet noise (see "Against ML-based classifiers" below),
+  `MaybeDecoy` emits keepalive-shaped decoy traffic so idle periods don't
+  visibly "go quiet," and `Observe` feeds back path measurements to train
+  both learners and, at most once per `MinDwell`, switch the active
+  disguise (which also re-picks that profile's payload type).
+- **`autonomous.go`** — an optional zero-configuration mode: `SendProbe`/
+  `PendingPong`/`RunAutonomous` let the Shaper measure its own RTT and loss
+  via self-generated probe/pong packets and drive `Observe` itself, so a
+  host application doesn't have to implement a ping loop at all. See
+  "Autonomous self-monitoring" below.
+- **`trace.go`** — `LoadDurationsFile` loads real captured inter-packet
+  timing into a `Profile.EmpiricalIntervals` for calibration against actual
+  traffic instead of the synthetic timing model.
 
 A forward pass through the whole thing (bandit distribution + NN
 inference) is a few dozen floating-point multiply-adds — real work, real
@@ -111,6 +122,97 @@ partway through the run, then blocks the video fingerprint too. Watch the
 bandit's weight for that profile visibly drops, and the shaper switches —
 without any explicit renegotiation between client and server, since both
 sides derive their decisions independently from what they each observe.
+
+## Against ML-based classifiers: what this addresses, what it doesn't
+
+A fair objection to any traffic-disguise scheme: the network doing the
+blocking may itself be running an ML classifier, not simple rules — so
+"disguise the traffic" isn't automatically a win. Three concrete design
+choices in this module answer that, and one gap is left honestly open:
+
+- **Reacting to outcomes, not out-thinking the classifier.** The EXP3
+  bandit's regret bound holds against an *arbitrarily intelligent*
+  adversary by construction — it never assumes anything about how the
+  other side decides what to flag, only that flagging shows up as worse
+  throughput/loss. That's why this is a bandit and not a hand-tuned rule
+  list: it doesn't need to know the classifier is ML-based to route around
+  it, it just needs the classifier's actions to eventually cost it
+  something measurable.
+- **No single learnable payload-type constant.** Early versions of this
+  module hardcoded one payload type per profile — an obvious feature for a
+  classifier to key on. `Profile.PayloadTypes` is now a candidate list;
+  Shaper picks one per profile *activation* (matching how real SDP
+  negotiates a PT once per call) instead of per packet, so there's no
+  single number that "is" the audio disguise.
+- **Autocorrelated padding, not i.i.d. padding.** The first implementation
+  drew each packet's padding independently — but real codec frame sizes
+  are autocorrelated (rate control and motion compensation carry state
+  frame to frame), so per-packet-independent padding is itself an
+  unnatural, and therefore learnable, statistical signature. Padding now
+  follows a bounded mean-reverting random walk (`shaper.go`'s `padDrift`),
+  which produces the same "still varies every packet" property with a
+  realistic autocorrelation structure instead (see
+  `TestPaddingIsAutocorrelatedNotIID`).
+- **The open gap: synthetic ≠ real.** `Profile`'s default packet-size/
+  timing parameters are hand-picked Gaussians, not measurements. A
+  classifier trained specifically on *this tool's* traffic (rather than on
+  WebRTC in general) could in principle still learn the difference between
+  a real call and this synthetic approximation of one — that's a known,
+  general limitation of any hand-designed traffic-morphing scheme, not
+  something bandit adaptation fixes. `Profile.EmpiricalIntervals` (loaded
+  via `LoadDurationsFile`) exists specifically to close this gap with real
+  data: capture actual traffic of the kind you're imitating —
+  `tshark -r capture.pcapng -Y "udp.port==<port>" -T fields -e frame.time_delta_displayed > gaps.txt`
+  — and assign the result to a profile instead of relying on the synthetic
+  formula. Packet-size calibration from real captures is not implemented
+  yet (contributions welcome); timing was prioritized because it's the
+  harder property to fake after the fact (padding can adjust size at wrap
+  time, but genuine send timing is driven by the application above it).
+- Neither of these makes the disguise unbeatable against a sufficiently
+  resourced adversary — active probing (connecting to your server to check
+  it behaves like a real one) and TLS/DTLS handshake fingerprinting are
+  both still open attack surfaces this module doesn't address. The
+  realistic goal is raising the cost and false-positive rate of
+  classification, not guaranteeing undetectability.
+
+## Autonomous self-monitoring (no manual Observe() needed)
+
+The API described above expects the host application to measure RTT/loss
+itself and call `Observe()`. For a host that would rather not implement a
+ping loop, `Shaper` can measure its own path health via self-generated
+probe/pong packets and drive `Observe` internally:
+
+```go
+shaper, _ := aiobfs.New(aiobfs.Config{Key: wrapKey})
+
+// send moves wire bytes to the peer exactly like Wrap()ed traffic (e.g. a
+// UDP conn.Write). RunAutonomous calls it on its own schedule.
+stop := shaper.RunAutonomous(ctx, send, 2*time.Second)
+defer stop()
+
+// Receive loop: unchanged except PendingPong. Unwrap already treats
+// probes/pongs as non-data (isDecoy=true), so old code that skips decoys
+// keeps working without modification.
+for {
+    wire := receiveFromPeer()
+    payload, isDecoy, err := shaper.Unwrap(wire)
+    if err != nil {
+        continue
+    }
+    if pong, ok := shaper.PendingPong(); ok {
+        send(pong) // answer the peer's own probe — one extra line
+    }
+    if isDecoy {
+        continue
+    }
+    forwardIntoTunnel(payload)
+}
+```
+
+This is entirely additive: a caller with its own RTT/loss telemetry (a
+WireGuard handshake timer, an existing ping loop) can keep calling
+`Observe()` directly and ignore `RunAutonomous`/`SendProbe`/`PendingPong`
+altogether.
 
 ## Integrating this into an actual TURN/DTLS tunnel core
 
@@ -168,8 +270,10 @@ packet matches, never sent as an explicit index on the wire).
   vanilla EXP3's "weight never decreases" property made recovery from a
   freshly-throttled profile unacceptably slow and luck-dependent.
 - Five built-in profiles are provided; real deployments would benefit from
-  measuring actual WebRTC traffic on the target network to calibrate
-  `Profile` parameters more precisely, and from adding more profiles.
+  adding more, and from calibrating timing via `EmpiricalIntervals`/
+  `LoadDurationsFile` (see "Against ML-based classifiers" above).
+  Packet-size calibration from real captures isn't implemented yet — only
+  timing is.
 - This targets the same use case the rest of this repository already
   targets: helping a client reach a server across a network that
   restricts or throttles VPN-shaped traffic. It is not intended, and

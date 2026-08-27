@@ -18,6 +18,10 @@ const (
 
 	markerData  byte = 0x01
 	markerDecoy byte = 0x00
+	markerProbe byte = 0x02 // "please pong this ID back" — see autonomous.go
+	markerPong  byte = 0x03 // "here is your ID back" — see autonomous.go
+
+	autoStaleProbe = 3 * time.Second // how long an un-ponged probe counts as still-pending before drainAutoStats treats it as lost
 
 	defaultMinDwell     = 4 * time.Second
 	defaultLearningRate = 0.05
@@ -89,6 +93,15 @@ type Shaper struct {
 	tsMicros   uint32
 	ssrc       uint32
 	packetSent uint64
+	activePT   uint8
+	// padDrift is a normalized (0..1) position in an autocorrelated
+	// mean-reverting random walk, reinterpreted against whichever
+	// profile's PaddingMax is currently active (see wrapInternal). Kept as
+	// a single continuous process rather than reset per profile so the
+	// underlying drift trajectory itself carries no discontinuity a
+	// classifier could key on beyond what a real profile switch (PT/size
+	// regime change) would already show.
+	padDrift float64
 
 	learnMu         sync.Mutex
 	lastSwitch      time.Time
@@ -101,6 +114,19 @@ type Shaper struct {
 
 	replay *replayGuard
 	rng    *pseudoRand
+
+	// Autonomous self-monitoring state (see autonomous.go): SendProbe/
+	// Unwrap/RunAutonomous let a Shaper measure its own RTT and loss via
+	// self-generated probe/pong packets instead of requiring the host to
+	// implement its own ping loop and call Observe() manually.
+	autoMu       sync.Mutex
+	nextProbeID  uint32
+	pendingProbe map[uint32]time.Time
+	autoRTTEWMA  float64
+	autoHaveRTT  bool
+	autoSent     int
+	autoPonged   int
+	pongQueue    chan []byte
 }
 
 // New builds a Shaper from cfg.
@@ -154,6 +180,10 @@ func New(cfg Config) (*Shaper, error) {
 		lastSwitch: time.Now(),
 		replay:     newReplayGuard(defaultReplayWindow),
 		rng:        rng,
+		padDrift:   0.5,
+
+		pendingProbe: make(map[uint32]time.Time),
+		pongQueue:    make(chan []byte, 8),
 	}
 	arm, _ := s.bandit.selectArm()
 	if cfg.InitialProfile != "" {
@@ -165,7 +195,18 @@ func New(cfg Config) (*Shaper, error) {
 		}
 	}
 	atomic.StoreInt32(&s.currentIdx, int32(arm))
+	s.activePT = s.pickPayloadType(profiles[arm])
 	return s, nil
+}
+
+// pickPayloadType picks one payload type at random from the profile's
+// candidate list, for the caller to hold fixed for the duration of one
+// profile activation (see the PayloadTypes doc comment on Profile).
+func (s *Shaper) pickPayloadType(p Profile) uint8 {
+	if len(p.PayloadTypes) == 0 {
+		return 96 // reasonable generic dynamic-PT fallback
+	}
+	return p.PayloadTypes[s.rng.intn(len(p.PayloadTypes))] & 0x7F
 }
 
 // CurrentProfile returns the disguise currently in use.
@@ -209,21 +250,52 @@ func (s *Shaper) wrapInternal(marker byte, payload []byte) ([]byte, error) {
 	s.writeMu.Lock()
 	seq := s.seq
 	s.seq++
-	// tsMicros advances by roughly one profile send-interval per packet,
-	// with the same jitter model used for pacing (see profile.go) so the
-	// timestamp field's growth rate matches the packet-rate an observer
-	// sees, the way a real codec's RTP timestamp would.
-	intervalUs := profile.SendInterval.Microseconds()
-	jitterUs := int64(float64(intervalUs) * profile.IntervalJitter * (s.rng.float64()*2 - 1))
-	s.tsMicros += uint32(intervalUs + jitterUs)
+
+	// Pacing: bootstrap-sample from a real capture when the caller has
+	// calibrated one (EmpiricalIntervals), otherwise fall back to the
+	// synthetic mean+jitter formula. Either way this advances tsMicros so
+	// the RTP-like timestamp's growth rate matches the actual packet rate,
+	// the way a real codec's RTP timestamp would.
+	var intervalUs int64
+	if n := len(profile.EmpiricalIntervals); n > 0 {
+		intervalUs = profile.EmpiricalIntervals[s.rng.intn(n)].Microseconds()
+	} else {
+		nominal := profile.SendInterval.Microseconds()
+		jitter := int64(float64(nominal) * profile.IntervalJitter * (s.rng.float64()*2 - 1))
+		intervalUs = nominal + jitter
+	}
+	s.tsMicros += uint32(intervalUs)
 	ts := s.tsMicros
 	ssrc := s.ssrc
+	pt := s.activePT
 	s.packetSent++
+
+	// Padding target follows an autocorrelated mean-reverting random walk
+	// (a discrete Ornstein-Uhlenbeck process) bounded to [0,1], reinterpreted
+	// against this profile's PaddingMax — NOT an independent draw per
+	// packet. Real codec frame sizes are autocorrelated (rate control and
+	// motion compensation carry state from frame to frame); sampling
+	// padding i.i.d. per packet would itself be an unnatural — and
+	// therefore learnable — statistical signature that a classifier
+	// trained specifically on this tool's traffic could pick up on, even
+	// though the size still "varies" packet to packet either way.
+	const reversionRate = 0.2
+	const noiseStddev = 0.15
+	s.padDrift += reversionRate*(0.5-s.padDrift) + noiseStddev*s.rng.gaussian()
+	if s.padDrift < 0 {
+		s.padDrift = 0
+	} else if s.padDrift > 1 {
+		s.padDrift = 1
+	}
+	padNeeded := 0
+	if profile.PaddingMax > 0 {
+		padNeeded = int(s.padDrift * float64(profile.PaddingMax))
+	}
 	s.writeMu.Unlock()
 
 	var header [headerLen]byte
 	header[0] = 0x80 | 0x20 // V=2, P=1 (padding present), X=0, CC=0
-	header[1] = profile.PayloadType & 0x7F
+	header[1] = pt & 0x7F
 	binary.BigEndian.PutUint16(header[2:4], seq)
 	binary.BigEndian.PutUint32(header[4:8], ts)
 	binary.BigEndian.PutUint32(header[8:12], ssrc)
@@ -234,21 +306,14 @@ func (s *Shaper) wrapInternal(marker byte, payload []byte) ([]byte, error) {
 
 	sealed := s.aead.Seal(nil, header[:], plaintext, header[:])
 
-	// Padding is sampled independently of the ciphertext length: aiming for
-	// an exact target wire size (mean +/- stddev around
-	// profile.PacketBytesMean) works fine while the real ciphertext is
-	// smaller than that target, but the moment the caller's payload makes
-	// the ciphertext *exceed* it, "how much padding to hit the target"
-	// clamps to the same floor value on every single packet — collapsing
-	// the very padding meant to hide the true size into a constant, which
-	// is a worse fingerprint than no padding at all. Sampling padding
-	// uniformly from [0, PaddingMax] regardless of ciphertext length keeps
-	// every packet's wire size varying no matter how the payload compares
-	// to the profile's nominal size.
-	padNeeded := 0
-	if profile.PaddingMax > 0 {
-		padNeeded = s.rng.intn(profile.PaddingMax + 1)
-	}
+	// padNeeded is computed independently of the ciphertext length: aiming
+	// for an exact target wire size around profile.PacketBytesMean works
+	// fine while the real ciphertext is smaller than that target, but the
+	// moment the caller's payload makes the ciphertext *exceed* it, "how
+	// much padding to hit the target" clamps to the same floor value on
+	// every single packet — collapsing the very padding meant to hide the
+	// true size into a constant, which is a worse fingerprint than no
+	// padding at all.
 	padTotal := padNeeded + 1 // +1 for the length byte itself, RFC3550-style
 
 	out := make([]byte, headerLen+len(sealed)+padTotal)
@@ -263,13 +328,20 @@ func (s *Shaper) wrapInternal(marker byte, payload []byte) ([]byte, error) {
 	return out, nil
 }
 
-// Unwrap authenticates and decrypts a wire packet produced by Wrap or
-// MaybeDecoy on the peer side. isDecoy is true for a decoy packet — the
+// Unwrap authenticates and decrypts a wire packet produced by Wrap,
+// MaybeDecoy, or SendProbe on the peer side. isDecoy is true for anything
+// that isn't real tunnel data — a decoy, or one of the self-monitoring
+// probe/pong packets used by the autonomous mode (see autonomous.go) — the
 // caller should drop it rather than forwarding it into the tunneled
 // connection, but must still have called Unwrap so the AEAD/replay checks
 // ran (dropping unauthenticated bytes instead would let an attacker
-// distinguish decoys from data by whether the recipient bothers to check
-// them at all).
+// distinguish non-data packets from data by whether the recipient bothers
+// to check them at all). Unwrap also transparently drives the autonomous
+// probe/pong protocol as a side effect: a received probe queues a pong for
+// PendingPong to hand back to the caller to send, and a received pong
+// updates this Shaper's own internal RTT/loss tracking used by
+// RunAutonomous — none of that requires any extra action from the caller
+// beyond the normal receive loop.
 func (s *Shaper) Unwrap(wire []byte) (payload []byte, isDecoy bool, err error) {
 	if len(wire) < headerLen+1 {
 		return nil, false, errors.New("aiobfs: packet too short")
@@ -306,7 +378,16 @@ func (s *Shaper) Unwrap(wire []byte) (payload []byte, isDecoy bool, err error) {
 	}
 
 	marker := plain[0]
-	return plain[1:], marker == markerDecoy, nil
+	payload = plain[1:]
+
+	switch marker {
+	case markerProbe:
+		s.handleIncomingProbe(payload)
+	case markerPong:
+		s.handleIncomingPong(payload)
+	}
+
+	return payload, marker != markerData, nil
 }
 
 // Observe feeds back path measurements (recent average round-trip time,
@@ -353,6 +434,10 @@ func (s *Shaper) Observe(rttMs, lossRate, throughputBps float64) bool {
 		atomic.StoreInt32(&s.currentIdx, int32(candidateArm))
 		s.lastSwitch = now
 		switched = true
+
+		s.writeMu.Lock()
+		s.activePT = s.pickPayloadType(s.profiles[candidateArm])
+		s.writeMu.Unlock()
 	}
 
 	s.pendingArm = useArm
