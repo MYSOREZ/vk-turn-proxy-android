@@ -343,42 +343,19 @@ func (s *Shaper) wrapInternal(marker byte, payload []byte) ([]byte, error) {
 // RunAutonomous — none of that requires any extra action from the caller
 // beyond the normal receive loop.
 func (s *Shaper) Unwrap(wire []byte) (payload []byte, isDecoy bool, err error) {
-	if len(wire) < headerLen+1 {
-		return nil, false, errors.New("aiobfs: packet too short")
-	}
-	if wire[0]>>6 != 2 {
-		return nil, false, errors.New("aiobfs: not an RTP-shaped packet (bad version)")
-	}
-	header := wire[:headerLen]
-
-	payloadEnd := len(wire)
-	if wire[0]&0x20 != 0 { // padding flag
-		padLen := int(wire[len(wire)-1])
-		if padLen == 0 || padLen > payloadEnd-headerLen {
-			return nil, false, fmt.Errorf("aiobfs: invalid padding length %d", padLen)
-		}
-		payloadEnd -= padLen
-	}
-
-	ciphertext := wire[headerLen:payloadEnd]
-	if len(ciphertext) <= s.aead.Overhead() {
-		return nil, false, errors.New("aiobfs: no payload after stripping header/padding")
+	header, ciphertext, err := parseWireFrame(wire, s.aead.Overhead())
+	if err != nil {
+		return nil, false, err
 	}
 
 	if !s.replay.accept(header) {
 		return nil, false, errors.New("aiobfs: replayed or duplicate packet")
 	}
 
-	plain, err := s.aead.Open(nil, header, ciphertext, header)
+	marker, payload, err := openFrame(s.aead, header, ciphertext)
 	if err != nil {
-		return nil, false, fmt.Errorf("aiobfs: authentication failed: %w", err)
+		return nil, false, err
 	}
-	if len(plain) == 0 {
-		return nil, false, errors.New("aiobfs: empty plaintext")
-	}
-
-	marker := plain[0]
-	payload = plain[1:]
 
 	switch marker {
 	case markerProbe:
@@ -388,6 +365,50 @@ func (s *Shaper) Unwrap(wire []byte) (payload []byte, isDecoy bool, err error) {
 	}
 
 	return payload, marker != markerData, nil
+}
+
+// parseWireFrame validates the RTP-shaped header and strips padding,
+// returning the header (also the AEAD nonce/AAD) and the still-encrypted
+// ciphertext+tag. Shared between Unwrap (which then applies replay
+// checking and opens with a fixed key) and TryUnwrap (which tries opening
+// with several candidate keys and has no replay state of its own).
+func parseWireFrame(wire []byte, aeadOverhead int) (header, ciphertext []byte, err error) {
+	if len(wire) < headerLen+1 {
+		return nil, nil, errors.New("aiobfs: packet too short")
+	}
+	if wire[0]>>6 != 2 {
+		return nil, nil, errors.New("aiobfs: not an RTP-shaped packet (bad version)")
+	}
+	header = wire[:headerLen]
+
+	payloadEnd := len(wire)
+	if wire[0]&0x20 != 0 { // padding flag
+		padLen := int(wire[len(wire)-1])
+		if padLen == 0 || padLen > payloadEnd-headerLen {
+			return nil, nil, fmt.Errorf("aiobfs: invalid padding length %d", padLen)
+		}
+		payloadEnd -= padLen
+	}
+
+	ciphertext = wire[headerLen:payloadEnd]
+	if len(ciphertext) <= aeadOverhead {
+		return nil, nil, errors.New("aiobfs: no payload after stripping header/padding")
+	}
+	return header, ciphertext, nil
+}
+
+// openFrame authenticates and decrypts a parsed frame, splitting the
+// leading marker byte (see markerData/markerDecoy/markerProbe/markerPong)
+// from the actual payload.
+func openFrame(aead cipher.AEAD, header, ciphertext []byte) (marker byte, payload []byte, err error) {
+	plain, err := aead.Open(nil, header, ciphertext, header)
+	if err != nil {
+		return 0, nil, fmt.Errorf("aiobfs: authentication failed: %w", err)
+	}
+	if len(plain) == 0 {
+		return 0, nil, errors.New("aiobfs: empty plaintext")
+	}
+	return plain[0], plain[1:], nil
 }
 
 // Observe feeds back path measurements (recent average round-trip time,

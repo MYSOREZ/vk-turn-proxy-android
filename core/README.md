@@ -80,6 +80,13 @@ what `aiobfs` is:
 - **`trace.go`** — `LoadDurationsFile` loads real captured inter-packet
   timing into a `Profile.EmpiricalIntervals` for calibration against actual
   traffic instead of the synthetic timing model.
+- **`trial.go`** — `TryUnwrap(keys, wire)` is a stateless multi-key
+  bootstrap helper for a server that supports several active
+  passwords/keys at once: try each candidate until one authenticates a new
+  connection's first packet, then build a persistent per-connection
+  `Shaper` with the winning key for everything after. Mirrors the
+  multi-password support most tunnel cores already have for their static
+  obfuscation layer.
 
 A forward pass through the whole thing (bandit distribution + NN
 inference) is a few dozen floating-point multiply-adds — real work, real
